@@ -1,0 +1,45 @@
+# Step 1: Extract template structure using Amazon Textract for a file in S3
+def extract_template_structure(s3_bucket, s3_key):
+    response = textract_client.start_document_analysis(
+        DocumentLocation={
+            'S3Object': {
+                'Bucket': s3_bucket,
+                'Name': s3_key
+            }
+        },
+        FeatureTypes=['TABLES', 'FORMS']
+    )
+    
+    job_id = response['JobId']
+
+    # Wait for the Textract job to finish
+    while True:
+        response = textract_client.get_document_analysis(JobId=job_id)
+        status = response['JobStatus']
+        if status == 'SUCCEEDED':
+            break
+        elif status == 'FAILED':
+            raise Exception("Textract job failed.")
+        time.sleep(5)  # Wait before checking status again
+
+    # Extract the blocks and structure from the response
+    blocks = response['Blocks']
+    template_structure = []
+    
+    for block in blocks:
+        if block['BlockType'] == 'LINE':  # For text blocks
+            block_data = {
+                "bbox": block['Geometry']['BoundingBox'],
+                "text": block['Text'],
+                "block_type": 'text',
+            }
+            template_structure.append(block_data)
+        elif block['BlockType'] == 'TABLE':  # For table blocks
+            block_data = {
+                "bbox": block['Geometry']['BoundingBox'],
+                "block_type": 'table',
+                "table_data": block  # Save table block for later use if needed
+            }
+            template_structure.append(block_data)
+
+    return template_structure
