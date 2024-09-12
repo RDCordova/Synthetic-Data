@@ -38,46 +38,44 @@ def check_textract_job_status(job_id):
         time.sleep(5)
 
 
-# Step 3: Extract Text and Tables After Job Completion
-def extract_text_and_tables_from_s3_async(bucket_name, document_name):
-    # Start Textract job
+# Step 3: Extract Text, Tables, and Layout (Bounding Box Information)
+def extract_text_and_tables_with_layout_from_s3_async(bucket_name, document_name):
     job_id = start_textract_job(bucket_name, document_name)
-    
-    # Wait for job to complete and get result
     response = check_textract_job_status(job_id)
 
-    # Extract relevant information (blocks)
     blocks = response['Blocks']
-    
-    # Lists to store extracted text and tables
     texts = []
     tables = []
 
-    # Helper function to extract table data
-    def extract_table_data(relationship_block, block_map):
+    def extract_table_data_with_layout(relationship_block, block_map):
         table_data = []
         for relationship in relationship_block['Relationships']:
             if relationship['Type'] == 'CHILD':
                 for child_id in relationship['Ids']:
                     cell_block = block_map[child_id]
                     if cell_block['BlockType'] == 'CELL':
-                        table_data.append(cell_block['Text'] if 'Text' in cell_block else "")
+                        cell_text = cell_block.get('Text', "")
+                        bbox = cell_block['Geometry']['BoundingBox']
+                        table_data.append({
+                            'text': cell_text,
+                            'bbox': bbox
+                        })
         return table_data
 
-    # Map blocks by their block ID
     block_map = {block['Id']: block for block in blocks}
 
-    # Iterate through blocks to get text and tables
     for block in blocks:
         if block['BlockType'] == 'LINE':
-            texts.append(block['Text'])
+            bbox = block['Geometry']['BoundingBox']
+            texts.append({
+                'text': block['Text'],
+                'bbox': bbox
+            })
         elif block['BlockType'] == 'TABLE':
-            table_data = extract_table_data(block, block_map)
+            table_data = extract_table_data_with_layout(block, block_map)
             tables.append(table_data)
 
-    # Return extracted text and tables
-    extracted_text = "\n".join(texts)
-    return extracted_text, tables
+    return texts, tables
 
 
 # Step 4: Setup and Load Claude 3 Model
@@ -122,46 +120,66 @@ def generate_new_content(extracted_text, tables):
     # Add each table to the prompt
     for i, table in enumerate(tables):
         prompt += f"\n[Table {i + 1}]\n"
-        table_content = "\n".join([str(cell) for cell in table])  # Formatting the table cells
+        table_content = "\n".join([str(cell['text']) for cell in table])  # Formatting the table cells
         prompt += table_content if table_content else 'No table data'
 
-    # Generate new content using Claude
-    response = llm(prompt)
-    return response
+    # Use Bedrock's invoke method to get the response
+    response = llm.invoke(body={"prompt": prompt})
+
+    # Parse the result from the invocation
+    generated_content = response.get('body').decode('utf-8')  # Ensure it's decoded correctly if it's in bytes
+
+    return generated_content
 
 
-# Step 6: Rebuild the PDF with Tables and Text Using reportlab
-def create_pdf(content, tables, output_file):
+# Step 6: Rebuild the PDF with Tables and Text Using Bounding Box Information
+def create_pdf_with_layout(content, tables, output_file, layout_data):
     c = canvas.Canvas(output_file, pagesize=letter)
     width, height = letter
 
-    # Write text content to the PDF
-    text = c.beginText(40, height - 40)
-    text.textLines(content)
-    c.drawText(text)
+    # Draw text with bounding box layout information
+    for item in layout_data:
+        text = item['text']
+        bbox = item['bbox']
+        # Convert bbox coordinates from percentages to actual page coordinates
+        x = bbox['Left'] * width
+        y = height - (bbox['Top'] * height)  # Textract's y coordinates are from bottom-left
+        w = bbox['Width'] * width
+        h = bbox['Height'] * height
 
-    # Draw tables on the PDF
-    for i, table_data in enumerate(tables):
-        if table_data:
-            # Render a table, adjust position and size as needed
-            table = Table([table_data], repeatRows=1)
-            table.wrapOn(c, width, height)
-            table.drawOn(c, 40, height - (200 + (i * 100)))  # Adjust positions accordingly
+        # Draw the text within the bounding box
+        c.setFont("Helvetica", 10)  # Use similar font to the original
+        c.drawString(x, y, text)
+
+    # Draw tables with bounding box layout information
+    for table in tables:
+        for cell in table:
+            cell_text = cell['text']
+            bbox = cell['bbox']
+            x = bbox['Left'] * width
+            y = height - (bbox['Top'] * height)
+            w = bbox['Width'] * width
+            h = bbox['Height'] * height
+
+            # Draw each cell's text inside the bounding box
+            c.setFont("Helvetica", 10)
+            c.drawString(x, y, cell_text)
+            c.rect(x, y - h, w, h)  # Draw cell borders
 
     # Save the PDF
     c.save()
 
 
-# Step 7: Main function to process the PDF from S3 and create a new version
-def process_pdf_from_s3(bucket_name, document_name, output_pdf):
-    # Step 1: Extract text and tables from the input PDF stored in S3
-    extracted_text, tables = extract_text_and_tables_from_s3_async(bucket_name, document_name)
+# Step 7: Main function to process the PDF from S3 and create a new version with layout
+def process_pdf_from_s3_with_layout(bucket_name, document_name, output_pdf):
+    # Step 1: Extract text, tables, and layout from the input PDF stored in S3
+    extracted_text, tables = extract_text_and_tables_with_layout_from_s3_async(bucket_name, document_name)
 
     # Step 2: Generate new content based on extracted data
     new_content = generate_new_content(extracted_text, tables)
 
-    # Step 3: Create a new PDF with the generated content
-    create_pdf(new_content, tables, output_pdf)
+    # Step 3: Create a new PDF with the generated content and layout information
+    create_pdf_with_layout(new_content, tables, output_pdf, extracted_text)
 
 
 # Example usage:
@@ -170,5 +188,4 @@ document_name = 'your-pdf-file.pdf'  # Replace with the name of the PDF file in 
 output_pdf = 'path_to_output_pdf.pdf'  # Replace with the path where you want to save the new PDF
 
 # Call the function to process the PDF from S3 and generate a new version
-process_pdf_from_s3(bucket_name, document_name, output_pdf)
-
+process_pdf_from_s3_with_layout(bucket_name, document_name, output_pdf)
