@@ -1,8 +1,10 @@
-iimport boto3
+import boto3
 import time
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Table
+from botocore.config import Config
+from langchain_community.bedrock import BedrockChat
 
 # Step 1: Start Textract Asynchronous Job for Large PDFs or Complex Documents
 def start_textract_job(bucket_name, document_name):
@@ -78,15 +80,36 @@ def extract_text_and_tables_from_s3_async(bucket_name, document_name):
     return extracted_text, tables
 
 
-# Step 4: Use Claude 3.5 to Generate New Content
+# Step 4: Setup and Load Claude 3 Model
+def load_model():
+    config = Config(read_timeout=1000)
+
+    bedrock_runtime = boto3.client(service_name='bedrock-runtime', 
+                                   region_name='us-east-1',
+                                   config=config)
+
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    
+    model_kwargs = { 
+        "max_tokens": 100000,
+        "temperature": 0,
+        "top_k": 250,
+        "top_p": 1,
+        "stop_sequences": ["\n\nHuman"],
+    }
+    
+    model = BedrockChat(
+        client=bedrock_runtime,
+        model_id=model_id,
+        model_kwargs=model_kwargs,
+    )
+
+    return model
+
+
+# Step 5: Use Claude 3 to Generate New Content
 def generate_new_content(extracted_text, tables):
-    from langchain_community.bedrock import Bedrock
-
-    # Initialize the Bedrock client
-    client = boto3.client("bedrock-runtime")
-
-    # Instantiate the Claude 3.5 model from Bedrock
-    model = Bedrock(model_id="claude-3.5", client=client)
+    llm = load_model()
 
     # Prepare the prompt with the extracted text
     prompt = f"""
@@ -103,11 +126,11 @@ def generate_new_content(extracted_text, tables):
         prompt += table_content if table_content else 'No table data'
 
     # Generate new content using Claude
-    result = model.generate(prompt)
-    return result
+    response = llm(prompt)
+    return response
 
 
-# Step 5: Rebuild the PDF with Tables and Text Using reportlab
+# Step 6: Rebuild the PDF with Tables and Text Using reportlab
 def create_pdf(content, tables, output_file):
     c = canvas.Canvas(output_file, pagesize=letter)
     width, height = letter
@@ -129,7 +152,7 @@ def create_pdf(content, tables, output_file):
     c.save()
 
 
-# Step 6: Main function to process the PDF from S3 and create a new version
+# Step 7: Main function to process the PDF from S3 and create a new version
 def process_pdf_from_s3(bucket_name, document_name, output_pdf):
     # Step 1: Extract text and tables from the input PDF stored in S3
     extracted_text, tables = extract_text_and_tables_from_s3_async(bucket_name, document_name)
