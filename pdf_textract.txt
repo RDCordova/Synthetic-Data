@@ -1,0 +1,147 @@
+import boto3
+from botocore.config import Config
+from langchain_community.bedrock import BedrockChat  # Assuming langchain_community is being used
+import time
+
+# Load Amazon Bedrock Claude 3.5 model
+def load_model():
+    config = Config(read_timeout=1000)
+
+    bedrock_runtime = boto3.client(service_name='bedrock-runtime', 
+                                   region_name='us-east-1',
+                                   config=config)
+
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    
+    model_kwargs = { 
+        "max_tokens": 100000,
+        "temperature": 0,
+        "top_k": 250,
+        "top_p": 1,
+        "stop_sequences": ["\n\nHuman"],
+    }
+    
+    model = BedrockChat(
+        client=bedrock_runtime,
+        model_id=model_id,
+        model_kwargs=model_kwargs,
+    )
+
+    return model
+
+llm = load_model()
+
+# Initialize Amazon Textract client
+textract_client = boto3.client('textract', region_name='us-east-1')
+
+# Step 1: Extract template structure using Amazon Textract
+def extract_template_structure(pdf_path):
+    # Load the PDF from S3 (or directly from file if using byte content)
+    with open(pdf_path, 'rb') as document:
+        response = textract_client.start_document_analysis(
+            Document={'Bytes': document.read()},
+            FeatureTypes=['TABLES', 'FORMS']
+        )
+    
+    job_id = response['JobId']
+
+    # Wait for the Textract job to finish
+    while True:
+        response = textract_client.get_document_analysis(JobId=job_id)
+        status = response['JobStatus']
+        if status == 'SUCCEEDED':
+            break
+        elif status == 'FAILED':
+            raise Exception("Textract job failed.")
+        time.sleep(5)  # Wait before checking status again
+
+    # Extract the blocks and structure from the response
+    blocks = response['Blocks']
+    template_structure = []
+    
+    for block in blocks:
+        if block['BlockType'] == 'LINE':  # For text blocks
+            block_data = {
+                "bbox": block['Geometry']['BoundingBox'],
+                "text": block['Text'],
+                "block_type": 'text',
+            }
+            template_structure.append(block_data)
+        elif block['BlockType'] == 'TABLE':  # For table blocks
+            block_data = {
+                "bbox": block['Geometry']['BoundingBox'],
+                "block_type": 'table',
+                "table_data": block  # Save table block for later use if needed
+            }
+            template_structure.append(block_data)
+
+    return template_structure
+
+# Step 2: Section Semantics Identification using Bedrock Claude 3.5
+def identify_semantics(structure, text):
+    prompt = f"Identify semantics and replaceable entities in the following text: {text}"
+    response = llm.predict(prompt)
+    return response  # Returns a dict with identified sections and semantics
+
+# Step 3: Information Retrieval with User Interaction
+def retrieve_information(semantics):
+    missing_data = []
+    for item in semantics:
+        if "replaceable" in item:
+            # Here, we're using Bedrock Claude to try and fill in the missing info
+            prompt = f"Extract information for the following: {item['text']}"
+            data = llm.predict(prompt)
+            if not data:
+                print(f"Missing data for: {item['text']}")
+                user_input = input(f"Please provide the value for '{item['text']}': ")
+                item['replacement'] = user_input
+            else:
+                item['replacement'] = data
+    return semantics
+
+# Step 4: Content Generation using Bedrock Claude 3.5
+def generate_content(semantics, accumulated_prompt):
+    generated_content = []
+    for section in semantics:
+        prompt = f"Generate content based on the following semantics: {section['text']}. Context: {accumulated_prompt}"
+        content = llm.predict(prompt)
+        generated_content.append(content)
+    return generated_content
+
+# Step 5: Document Post-processing (Reassembling the final PDF)
+def assemble_document(template_structure, generated_content, output_pdf_path):
+    import fitz  # Use PyMuPDF for the final PDF generation
+    document = fitz.open()  # Create a new document
+    
+    for page_num, content in enumerate(generated_content):
+        page = document.new_page()
+        for block in template_structure:
+            if block['block_type'] == 'text':  # Text block
+                # Place the generated content in the appropriate location
+                bbox = block['bbox']
+                page.insert_text((bbox['Left'], bbox['Top']), content)
+            elif block['block_type'] == 'table':  # Table block
+                # Retain the original table from the template (optional)
+                pass
+    
+    document.save(output_pdf_path)
+
+# Example usage
+template_path = "template.pdf"
+output_path = "output.pdf"
+
+# Step 1: Extract template structure using Amazon Textract
+template_structure = extract_template_structure(template_path)
+
+# Step 2: Identify section semantics using Bedrock Claude 3.5
+semantics = [identify_semantics(template_structure, block['text']) for block in template_structure if block['block_type'] == 'text']
+
+# Step 3: Retrieve missing information, with user prompts for missing data
+semantics_with_data = retrieve_information(semantics)
+
+# Step 4: Generate content based on template and retrieved info
+accumulated_prompt = "Prompt with necessary context and user-provided data"
+generated_content = generate_content(semantics_with_data, accumulated_prompt)
+
+# Step 5: Assemble and save the final document
+assemble_document(template_structure, generated_content, output_path)
