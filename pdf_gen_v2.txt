@@ -1,0 +1,136 @@
+import warnings
+import os
+import fitz  # PyMuPDF
+import boto3
+from botocore.config import Config
+from langchain_community.bedrock import BedrockChat  # Assuming langchain_community is being used
+
+warnings.filterwarnings("ignore")
+
+
+# Load Amazon Bedrock Claude 3.5 model
+def load_model():
+    config = Config(read_timeout=1000)
+
+    bedrock_runtime = boto3.client(service_name='bedrock-runtime', 
+                                   region_name='us-east-1',
+                                   config=config)
+
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    
+    model_kwargs = { 
+        "max_tokens": 100000,
+        "temperature": 0,
+        "top_k": 250,
+        "top_p": 1,
+        "stop_sequences": ["\n\nHuman"],
+    }
+    
+    model = BedrockChat(
+        client=bedrock_runtime,
+        model_id=model_id,
+        model_kwargs=model_kwargs,
+    )
+
+    return model
+
+
+llm = load_model()
+
+# Step 1: Template Pre-processing
+def extract_template_structure(pdf_path):
+    document = fitz.open(pdf_path)
+    template_structure = []
+    
+    for page_num in range(len(document)):
+        page = document.load_page(page_num)
+        blocks = page.get_text("dict")["blocks"]
+        
+        for block in blocks:
+            text_content = "\n".join([span["text"] for line in block["lines"] for span in line["spans"]]) if block["type"] == 0 else None
+            block_data = {
+                "bbox": block["bbox"],
+                "text": text_content,
+                "block_type": block["type"]  # 0: text, 1: image
+            }
+            template_structure.append(block_data)
+    
+    return template_structure
+
+
+# Step 2: Section Semantics Identification using Bedrock Claude 3.5
+def identify_semantics(structure, text):
+    prompt = f"Identify semantics and replaceable entities in the following text: {text}"
+    try:
+        response = llm.predict(prompt)
+    except Exception as e:
+        print(f"Error in identifying semantics: {e}")
+        response = {}
+    return response  # Returns a dict with identified sections and semantics
+
+
+# Step 3: Information Retrieval with User Interaction
+def retrieve_information(semantics):
+    missing_data = []
+    for item in semantics:
+        if "replaceable" in item:
+            # Here, we're using Bedrock Claude to try and fill in the missing info
+            prompt = f"Extract information for the following: {item['text']}"
+            data = llm.predict(prompt)
+            if not data:
+                print(f"Missing data for: {item['text']}")
+                user_input = input(f"Please provide the value for '{item['text']}': ")
+                item['replacement'] = user_input
+            else:
+                item['replacement'] = data
+    return semantics
+
+
+# Step 4: Content Generation using Bedrock Claude 3.5
+def generate_content(semantics, accumulated_prompt):
+    generated_content = []
+    for section in semantics:
+        prompt = f"Generate content based on the following semantics: {section['text']}. Context: {accumulated_prompt}"
+        content = llm.predict(prompt)
+        generated_content.append(content)
+    return generated_content
+
+
+# Step 5: Document Post-processing
+def assemble_document(template_structure, generated_content, output_pdf_path):
+    document = fitz.open()
+    
+    for page_num, content in enumerate(generated_content):
+        page = document.new_page()
+        for block in template_structure:
+            if block['block_type'] == 0:  # Text block
+                # Place the generated content in the appropriate location
+                bbox = block['bbox']
+                page.insert_text(bbox[:2], content)
+            elif block['block_type'] == 1:  # Image block
+                # Retain the original image from the template (optional)
+                pass
+    
+    document.save(output_pdf_path)
+
+
+# Example usage
+template_path = "template.pdf"
+output_path = "output.pdf"
+
+# Step 1: Extract template structure
+template_structure = extract_template_structure(template_path)
+
+# Step 2: Identify section semantics
+semantics = [identify_semantics(template_structure, block['text']) for block in template_structure if block['block_type'] == 0]
+
+# Step 3: Retrieve missing information, with user prompts for missing data
+semantics_with_data = retrieve_information(semantics)
+
+# Step 4: Generate content based on template and retrieved info
+accumulated_prompt = "Prompt with necessary context and user-provided data"
+generated_content = generate_content(semantics_with_data, accumulated_prompt)
+
+# Step 5: Assemble and save the final document
+assemble_document(template_structure, generated_content, output_path)
+print(f"Generated PDF saved at {output_path}")
