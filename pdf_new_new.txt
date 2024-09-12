@@ -137,19 +137,31 @@ def create_pdf_with_layout(content, tables, output_file, layout_data):
     c = canvas.Canvas(output_file, pagesize=letter)
     width, height = letter
 
+    # Keep track of current Y position to avoid overlap
+    current_y = height - 50  # Start a bit below the top for the first element
+
     # Draw text with bounding box layout information
     for item in layout_data:
         text = item['text']
         bbox = item['bbox']
+
         # Convert bbox coordinates from percentages to actual page coordinates
         x = bbox['Left'] * width
         y = height - (bbox['Top'] * height)  # Textract's y coordinates are from bottom-left
         w = bbox['Width'] * width
         h = bbox['Height'] * height
 
+        # Adjust Y position to avoid overlap
+        if current_y - h < 50:  # If we are too low on the page, start a new page
+            c.showPage()
+            current_y = height - 50
+
         # Draw the text within the bounding box
         c.setFont("Helvetica", 10)  # Use similar font to the original
-        c.drawString(x, y, text)
+        c.drawString(x, current_y, text)
+        
+        # Move Y position down for the next line
+        current_y -= h + 10  # Add some padding between lines
 
     # Draw tables with bounding box layout information
     for table in tables:
@@ -161,10 +173,18 @@ def create_pdf_with_layout(content, tables, output_file, layout_data):
             w = bbox['Width'] * width
             h = bbox['Height'] * height
 
+            # Adjust Y position for tables to avoid overlap
+            if current_y - h < 50:  # If we are too low on the page, start a new page
+                c.showPage()
+                current_y = height - 50
+
             # Draw each cell's text inside the bounding box
             c.setFont("Helvetica", 10)
-            c.drawString(x, y, cell_text)
-            c.rect(x, y - h, w, h)  # Draw cell borders
+            c.drawString(x, current_y, cell_text)
+            c.rect(x, current_y - h, w, h)  # Draw cell borders
+
+            # Move Y position down for the next row of the table
+            current_y -= h + 10
 
     # Save the PDF
     c.save()
