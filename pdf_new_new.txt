@@ -1,15 +1,16 @@
-import boto3
+iimport boto3
+import time
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Table
 
-# Step 1: Extract Text and Tables Using Amazon Textract from S3
-def extract_text_and_tables_from_s3(bucket_name, document_name):
+# Step 1: Start Textract Asynchronous Job for Large PDFs or Complex Documents
+def start_textract_job(bucket_name, document_name):
     textract = boto3.client('textract')
 
-    # Call Textract to analyze the document stored in S3 and extract both tables and text
-    response = textract.analyze_document(
-        Document={
+    # Start document analysis (asynchronous)
+    response = textract.start_document_analysis(
+        DocumentLocation={
             'S3Object': {
                 'Bucket': bucket_name,
                 'Name': document_name
@@ -18,7 +19,32 @@ def extract_text_and_tables_from_s3(bucket_name, document_name):
         FeatureTypes=['TABLES', 'FORMS']
     )
 
-    # Extracting relevant information (blocks)
+    job_id = response['JobId']
+    return job_id
+
+
+# Step 2: Check Job Status
+def check_textract_job_status(job_id):
+    textract = boto3.client('textract')
+    while True:
+        response = textract.get_document_analysis(JobId=job_id)
+        status = response['JobStatus']
+        if status == 'SUCCEEDED':
+            return response
+        elif status == 'FAILED':
+            raise Exception(f"Textract job failed: {response}")
+        time.sleep(5)
+
+
+# Step 3: Extract Text and Tables After Job Completion
+def extract_text_and_tables_from_s3_async(bucket_name, document_name):
+    # Start Textract job
+    job_id = start_textract_job(bucket_name, document_name)
+    
+    # Wait for job to complete and get result
+    response = check_textract_job_status(job_id)
+
+    # Extract relevant information (blocks)
     blocks = response['Blocks']
     
     # Lists to store extracted text and tables
@@ -52,7 +78,7 @@ def extract_text_and_tables_from_s3(bucket_name, document_name):
     return extracted_text, tables
 
 
-# Step 2: Use Claude 3.5 to Generate New Content
+# Step 4: Use Claude 3.5 to Generate New Content
 def generate_new_content(extracted_text, tables):
     from langchain_community.bedrock import Bedrock
 
@@ -81,7 +107,7 @@ def generate_new_content(extracted_text, tables):
     return result
 
 
-# Step 3: Rebuild the PDF with Tables and Text Using reportlab
+# Step 5: Rebuild the PDF with Tables and Text Using reportlab
 def create_pdf(content, tables, output_file):
     c = canvas.Canvas(output_file, pagesize=letter)
     width, height = letter
@@ -103,10 +129,10 @@ def create_pdf(content, tables, output_file):
     c.save()
 
 
-# Main function to process the PDF from S3 and create a new version
+# Step 6: Main function to process the PDF from S3 and create a new version
 def process_pdf_from_s3(bucket_name, document_name, output_pdf):
     # Step 1: Extract text and tables from the input PDF stored in S3
-    extracted_text, tables = extract_text_and_tables_from_s3(bucket_name, document_name)
+    extracted_text, tables = extract_text_and_tables_from_s3_async(bucket_name, document_name)
 
     # Step 2: Generate new content based on extracted data
     new_content = generate_new_content(extracted_text, tables)
@@ -122,3 +148,4 @@ output_pdf = 'path_to_output_pdf.pdf'  # Replace with the path where you want to
 
 # Call the function to process the PDF from S3 and generate a new version
 process_pdf_from_s3(bucket_name, document_name, output_pdf)
+
