@@ -1,0 +1,180 @@
+import boto3
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from botocore.config import Config
+from langchain_community.bedrock import BedrockChat
+
+# Step 1: Start Textract Asynchronous Job for Large PDFs or Complex Documents
+def start_textract_job(bucket_name, document_name):
+    textract = boto3.client('textract')
+
+    # Start document analysis (asynchronous)
+    response = textract.start_document_analysis(
+        DocumentLocation={
+            'S3Object': {
+                'Bucket': bucket_name,
+                'Name': document_name
+            }
+        },
+        FeatureTypes=['TABLES', 'FORMS']
+    )
+
+    job_id = response['JobId']
+    return job_id
+
+
+# Step 2: Check Job Status
+def check_textract_job_status(job_id):
+    textract = boto3.client('textract')
+    while True:
+        response = textract.get_document_analysis(JobId=job_id)
+        status = response['JobStatus']
+        if status == 'SUCCEEDED':
+            return response
+        elif status == 'FAILED':
+            raise Exception(f"Textract job failed: {response}")
+        time.sleep(5)
+
+
+# Step 3: Extract Text, Tables, and Layout (Bounding Box Information) Using Textract
+def extract_text_and_tables_with_layout_from_s3_async(bucket_name, document_name):
+    job_id = start_textract_job(bucket_name, document_name)
+    response = check_textract_job_status(job_id)
+
+    blocks = response['Blocks']
+    text_blocks = []
+    table_blocks = []
+
+    def extract_table_data_with_layout(relationship_block, block_map):
+        table_data = []
+        for relationship in relationship_block['Relationships']:
+            if relationship['Type'] == 'CHILD':
+                for child_id in relationship['Ids']:
+                    cell_block = block_map[child_id]
+                    if cell_block['BlockType'] == 'CELL':
+                        cell_text = cell_block.get('Text', "")
+                        bbox = cell_block['Geometry']['BoundingBox']
+                        table_data.append({
+                            'text': cell_text,
+                            'bbox': bbox
+                        })
+        return table_data
+
+    block_map = {block['Id']: block for block in blocks}
+
+    for block in blocks:
+        if block['BlockType'] == 'LINE':
+            bbox = block['Geometry']['BoundingBox']
+            text_blocks.append({
+                'text': block['Text'],
+                'bbox': bbox
+            })
+        elif block['BlockType'] == 'TABLE':
+            table_data = extract_table_data_with_layout(block, block_map)
+            table_blocks.append(table_data)
+
+    return text_blocks, table_blocks
+
+
+# Step 4: Setup and Load Claude 3 Model
+def load_model():
+    config = Config(read_timeout=1000)
+
+    bedrock_runtime = boto3.client(service_name='bedrock-runtime', 
+                                   region_name='us-east-1',
+                                   config=config)
+
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    
+    model_kwargs = { 
+        "max_tokens": 100000,
+        "temperature": 0,
+        "top_k": 250,
+        "top_p": 1,
+        "stop_sequences": ["\n\nHuman"],
+    }
+    
+    model = BedrockChat(
+        client=bedrock_runtime,
+        model_id=model_id,
+        model_kwargs=model_kwargs,
+    )
+
+    return model
+
+
+# Step 5: Generate New Content Using Claude 3 and Map It Back to the Original Layout
+def generate_new_content_with_mapping(text_blocks, model):
+    new_text_blocks = []
+
+    for block in text_blocks:
+        # Pass the original text to Claude and get a replacement
+        prompt = f"Rewrite the following content:\n\n{block['text']}"
+        response = model.invoke(body={"prompt": prompt})
+        generated_text = response.get('body').decode('utf-8')
+
+        # Create a new block with the same bounding box but new text
+        new_text_blocks.append({'text': generated_text, 'bbox': block['bbox']})
+
+    return new_text_blocks
+
+
+# Step 6: Create the New PDF by Mapping the Generated Content to the Bounding Boxes
+def create_pdf_with_mapped_content(mapped_text_blocks, tables, output_file):
+    c = canvas.Canvas(output_file, pagesize=letter)
+    width, height = letter
+
+    # Function to scale bounding boxes to actual page size
+    def scale_bbox_to_page(bbox, width, height):
+        x = bbox['Left'] * width
+        y = height - (bbox['Top'] * height)  # Textract's Y is bottom-left
+        w = bbox['Width'] * width
+        h = bbox['Height'] * height
+        return x, y, w, h
+
+    # Draw mapped text blocks in their respective positions
+    for block in mapped_text_blocks:
+        text = block['text']
+        bbox = block['bbox']
+        x, y, w, h = scale_bbox_to_page(bbox, width, height)
+
+        # Draw the text within the bounding box
+        c.setFont("Helvetica", 10)
+        c.drawString(x, y, text)
+
+    # Draw tables with bounding box layout information
+    for table in tables:
+        for cell in table:
+            cell_text = cell['text']
+            bbox = cell['bbox']
+            x, y, w, h = scale_bbox_to_page(bbox, width, height)
+
+            # Draw table content
+            c.setFont("Helvetica", 10)
+            c.drawString(x, y - h, cell_text)
+            c.rect(x, y - h, w, h)
+
+    # Save the PDF
+    c.save()
+
+
+# Step 7: Main function to process the PDF from S3, generate new content, and create the final PDF
+def process_pdf_from_s3_with_mapped_content(bucket_name, document_name, output_pdf):
+    # Step 1: Extract text, tables, and layout from the input PDF stored in S3
+    extracted_text_blocks, table_blocks = extract_text_and_tables_with_layout_from_s3_async(bucket_name, document_name)
+
+    # Step 2: Load Claude 3 and generate new content while maintaining the layout structure
+    llm = load_model()
+    mapped_text_blocks = generate_new_content_with_mapping(extracted_text_blocks, llm)
+
+    # Step 3: Create a new PDF with the generated content and layout information
+    create_pdf_with_mapped_content(mapped_text_blocks, table_blocks, output_pdf)
+
+
+# Example usage:
+bucket_name = 'your-bucket-name'  # Replace with your S3 bucket name
+document_name = 'your-pdf-file.pdf'  # Replace with the name of the PDF file in S3
+output_pdf = 'path_to_output_pdf.pdf'  # Replace with the path where you want to save the new PDF
+
+# Call the function to process the PDF from S3, generate new content, and create a new version
+process_pdf_from_s3_with_mapped_content(bucket_name, document_name, output_pdf)
