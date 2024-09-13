@@ -1,0 +1,66 @@
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+
+def create_pdf_with_mapped_content(mapped_text_blocks, tables, output_file):
+    c = canvas.Canvas(output_file, pagesize=letter)
+    width, height = letter
+
+    # Keep track of the current vertical position (Y) on the page
+    current_y = height - 50  # Start a bit below the top for the first element
+
+    # Function to scale bounding boxes to actual page size
+    def scale_bbox_to_page(bbox, width, height):
+        x = bbox['Left'] * width
+        y = height - (bbox['Top'] * height)  # Textract's Y is bottom-left
+        w = bbox['Width'] * width
+        h = bbox['Height'] * height
+        return x, y, w, h
+
+    # Draw mapped text blocks in their respective positions
+    for block in mapped_text_blocks:
+        text = block['text']
+        bbox = block['bbox']
+        x, y, w, h = scale_bbox_to_page(bbox, width, height)
+
+        # Adjust the Y position to avoid overlap and manage page breaks
+        if current_y - h < 50:  # If we are too low on the page, start a new page
+            c.showPage()
+            current_y = height - 50  # Reset current_y for the new page
+
+        # Draw the text within the bounding box at the correct Y position
+        c.setFont("Helvetica", 10)
+        c.drawString(x, current_y, text)
+
+        # Move the Y position down after each block of text
+        current_y -= h + 10  # Add some padding between lines to avoid overlap
+
+    # Draw tables with bounding box layout information
+    for table in tables:
+        table_height = sum([cell['bbox']['Height'] * height for cell in table])  # Calculate total height of the table
+
+        # Check if the table fits on the current page
+        if current_y - table_height < 50:
+            c.showPage()
+            current_y = height - 50  # Reset Y position for the new page
+
+        # Now render the table
+        for cell in table:
+            cell_text = cell['text']
+            bbox = cell['bbox']
+            x, y, w, h = scale_bbox_to_page(bbox, width, height)
+
+            # Ensure we draw the table at the correct position
+            if current_y - h < 50:  # If the table row is too low, start a new page
+                c.showPage()
+                current_y = height - 50  # Reset Y position
+
+            # Draw each cell's text inside the bounding box
+            c.setFont("Helvetica", 10)
+            c.drawString(x, current_y, cell_text)
+            c.rect(x, current_y - h, w, h)  # Draw cell borders
+
+            # Move Y position down for the next row of the table
+            current_y -= h + 10
+
+    # Save the PDF
+    c.save()
