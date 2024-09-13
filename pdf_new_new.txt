@@ -2,7 +2,6 @@ import boto3
 import time
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-from reportlab.platypus import Table
 from botocore.config import Config
 from langchain_community.bedrock import BedrockChat
 
@@ -165,6 +164,14 @@ def create_pdf_with_layout(content, tables, output_file, layout_data):
 
     # Draw tables with bounding box layout information
     for table in tables:
+        table_height = sum([cell['bbox']['Height'] * height for cell in table])  # Calculate the total height of the table
+
+        # Check if the table fits on the current page
+        if current_y - table_height < 50:
+            c.showPage()
+            current_y = height - 50
+
+        # Now render the table
         for cell in table:
             cell_text = cell['text']
             bbox = cell['bbox']
@@ -173,8 +180,8 @@ def create_pdf_with_layout(content, tables, output_file, layout_data):
             w = bbox['Width'] * width
             h = bbox['Height'] * height
 
-            # Adjust Y position for tables to avoid overlap
-            if current_y - h < 50:  # If we are too low on the page, start a new page
+            # Ensure we draw the table at the correct position
+            if current_y - h < 50:
                 c.showPage()
                 current_y = height - 50
 
