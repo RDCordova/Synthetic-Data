@@ -1,0 +1,209 @@
+
+import streamlit as st
+import boto3
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from botocore.config import Config
+from langchain_community.bedrock import BedrockChat
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+import os
+
+# Reuse your existing functions from the provided code
+
+# Step 1: Start Textract Asynchronous Job for Large PDFs or Complex Documents
+def start_textract_job(bucket_name, document_name):
+    textract = boto3.client('textract')
+
+    response = textract.start_document_analysis(
+        DocumentLocation={'S3Object': {'Bucket': bucket_name, 'Name': document_name}},
+        FeatureTypes=['TABLES', 'FORMS']
+    )
+    return response['JobId']
+
+
+def check_textract_job_status(job_id):
+    textract = boto3.client('textract')
+    while True:
+        response = textract.get_document_analysis(JobId=job_id)
+        status = response['JobStatus']
+        if status == 'SUCCEEDED':
+            return response
+        elif status == 'FAILED':
+            raise Exception(f"Textract job failed: {response}")
+        time.sleep(5)
+
+
+def extract_text_and_tables_with_layout_from_s3_async(bucket_name, document_name):
+    job_id = start_textract_job(bucket_name, document_name)
+    response = check_textract_job_status(job_id)
+
+    blocks = response['Blocks']
+    text_blocks = []
+    table_blocks = []
+
+    def extract_table_data_with_layout(relationship_block, block_map):
+        table_data = []
+        for relationship in relationship_block['Relationships']:
+            if relationship['Type'] == 'CHILD':
+                for child_id in relationship['Ids']:
+                    cell_block = block_map[child_id]
+                    if cell_block['BlockType'] == 'CELL':
+                        cell_text = cell_block.get('Text', "")
+                        bbox = cell_block['Geometry']['BoundingBox']
+                        table_data.append({
+                            'text': cell_text,
+                            'bbox': bbox
+                        })
+        return table_data
+
+    block_map = {block['Id']: block for block in blocks}
+
+    for block in blocks:
+        if block['BlockType'] == 'LINE':
+            bbox = block['Geometry']['BoundingBox']
+            text_blocks.append({'text': block['Text'], 'bbox': bbox})
+        elif block['BlockType'] == 'TABLE':
+            table_data = extract_table_data_with_layout(block, block_map)
+            table_blocks.append(table_data)
+
+    return text_blocks, table_blocks
+
+
+def load_model(top_k, top_p, temperature):
+    config = Config(read_timeout=1000)
+    bedrock_runtime = boto3.client(service_name='bedrock-runtime', region_name='us-east-1', config=config)
+
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    
+    model_kwargs = { 
+        "max_tokens": 100000,
+        "temperature": temperature,
+        "top_k": top_k,
+        "top_p": top_p,
+        "stop_sequences": ["\n\nHuman"],
+    }
+    
+    model = BedrockChat(client=bedrock_runtime, model_id=model_id, model_kwargs=model_kwargs)
+    return model
+
+
+def generate_new_content_with_mapping(text_blocks, model):
+    new_text_blocks = []
+
+    def process_text_block(block):
+        prompt = f"Rewrite the following content:\n\n{block['text']}"
+        response = model.invoke(body={"prompt": prompt})
+        generated_text = response.get('body').decode('utf-8')
+        return {'text': generated_text, 'bbox': block['bbox']}
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_text_block, block) for block in text_blocks]
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Generating new content", unit="block"):
+            new_text_blocks.append(future.result())
+
+    return new_text_blocks
+
+
+def create_pdf_with_mapped_content(mapped_text_blocks, tables, output_file):
+    c = canvas.Canvas(output_file, pagesize=letter)
+    width, height = letter
+    current_y = height - 50
+
+    def scale_bbox_to_page(bbox, width, height):
+        x = bbox['Left'] * width
+        y = height - (bbox['Top'] * height)
+        w = bbox['Width'] * width
+        h = bbox['Height'] * height
+        return x, y, w, h
+
+    for block in mapped_text_blocks:
+        text = block['text']
+        bbox = block['bbox']
+        x, y, w, h = scale_bbox_to_page(bbox, width, height)
+
+        if current_y - h < 50:
+            c.showPage()
+            current_y = height - 50
+
+        c.setFont("Helvetica", 10)
+        c.drawString(x, current_y, text)
+        current_y -= h + 10
+
+    for table in tables:
+        table_height = sum([cell['bbox']['Height'] * height for cell in table])
+
+        if current_y - table_height < 50:
+            c.showPage()
+            current_y = height - 50
+
+        for cell in table:
+            cell_text = cell['text']
+            bbox = cell['bbox']
+            x, y, w, h = scale_bbox_to_page(bbox, width, height)
+
+            if current_y - h < 50:
+                c.showPage()
+                current_y = height - 50
+
+            c.setFont("Helvetica", 10)
+            c.drawString(x, current_y, cell_text)
+            c.rect(x, current_y - h, w, h)
+            current_y -= h + 10
+
+    c.save()
+
+
+def process_pdf_from_s3_with_mapped_content(bucket_name, document_name, output_pdf, top_k, top_p, temperature):
+    extracted_text_blocks, table_blocks = extract_text_and_tables_with_layout_from_s3_async(bucket_name, document_name)
+    llm = load_model(top_k, top_p, temperature)
+    mapped_text_blocks = generate_new_content_with_mapping(extracted_text_blocks, llm)
+    create_pdf_with_mapped_content(mapped_text_blocks, table_blocks, output_pdf)
+
+
+# Streamlit UI
+st.title("Generate PDFs with LLMs")
+st.write("Upload a PDF, adjust LLM hyperparameters, and generate new PDFs.")
+
+# Step 1: Upload PDF
+uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+
+if uploaded_file is not None:
+    temp_pdf_path = "temp_uploaded.pdf"
+    with open(temp_pdf_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    st.success("PDF uploaded successfully!")
+
+    # Step 2: Adjust LLM Hyperparameters
+    st.sidebar.header("Adjust LLM Hyperparameters")
+    top_k = st.sidebar.slider("Top K", min_value=1, max_value=1000, value=250, step=1)
+    top_p = st.sidebar.slider("Top P", min_value=0.0, max_value=1.0, value=0.9, step=0.01)
+    temperature = st.sidebar.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
+
+    num_pdfs = st.sidebar.slider("Number of PDFs to Generate", min_value=1, max_value=10, value=1)
+
+    if st.button("Generate PDFs"):
+        with st.spinner("Generating PDFs..."):
+            bucket_name = 'your-bucket-name'  # Set your S3 bucket name
+
+            def generate_pdfs(num_pdfs):
+                output_files = []
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = []
+                    for i in range(num_pdfs):
+                        output_pdf = f"generated_pdf_{i+1}.pdf"
+                        futures.append(executor.submit(process_pdf_from_s3_with_mapped_content, bucket_name, temp_pdf_path, output_pdf, top_k, top_p, temperature))
+
+                    for future in as_completed(futures):
+                        result = future.result()
+                        output_files.append(result)
+
+                return output_files
+
+            generated_pdfs = generate_pdfs(num_pdfs)
+
+            for i, pdf_file in enumerate(generated_pdfs):
+                st.success(f"PDF {i+1} generated successfully!")
+                with open(pdf_file, "rb") as file:
+                    st.download_button(f"Download PDF {i+1}", file, f"generated_pdf_{i+1}.pdf", mime="application/pdf")
