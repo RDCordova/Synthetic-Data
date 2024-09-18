@@ -1,4 +1,3 @@
-
 import streamlit as st
 import boto3
 from reportlab.lib.pagesizes import letter
@@ -163,46 +162,64 @@ def process_pdf_from_s3_with_mapped_content(bucket_name, document_name, output_p
 
 
 # Streamlit UI
-st.title("Generate PDFs with LLMs")
-st.write("Upload a PDF, adjust LLM hyperparameters, and generate new PDFs.")
+st.title("Content Generation")
 
-# Step 1: Upload PDF
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+# Step 1: User selects between PDF or Tabular Data Generation
+generation_type = st.radio("Select Generation Type", ["PDF Generation", "Tabular Data Generation"])
 
-# Sidebar for Hyperparameters
-st.sidebar.header("Adjust LLM Hyperparameters")
-top_k = st.sidebar.slider("Top K", min_value=1, max_value=1000, value=250, step=1)
-top_p = st.sidebar.slider("Top P", min_value=0.0, max_value=1.0, value=0.9, step=0.01)
-temperature = st.sidebar.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
-num_pdfs = st.sidebar.slider("Number of PDFs to Generate", min_value=1, max_value=10, value=1)
+# If user selects PDF Generation
+if generation_type == "PDF Generation":
+    st.write("### PDF Generation")
+    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
 
-if uploaded_file is not None:
-    temp_pdf_path = "temp_uploaded.pdf"
-    with open(temp_pdf_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    st.success("PDF uploaded successfully!")
+    # Sidebar for Hyperparameters with Title
+    st.sidebar.title("Generation Options")
+    st.sidebar.header("Adjust LLM Hyperparameters")
+    top_k = st.sidebar.slider("Top K", min_value=1, max_value=1000, value=250, step=1)
+    top_p = st.sidebar.slider("Top P", min_value=0.0, max_value=1.0, value=0.9, step=0.01)
+    temperature = st.sidebar.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
+    num_pdfs = st.sidebar.slider("Number of PDFs to Generate", min_value=1, max_value=10, value=1)
 
-    if st.button("Generate PDFs"):
-        with st.spinner("Generating PDFs..."):
-            bucket_name = 'your-bucket-name'  # Set your S3 bucket name
+    if uploaded_file is not None:
+        temp_pdf_path = "temp_uploaded.pdf"
+        with open(temp_pdf_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        st.success("PDF uploaded successfully!")
 
-            def generate_pdfs(num_pdfs):
-                output_files = []
-                with ThreadPoolExecutor(max_workers=5) as executor:
-                    futures = []
-                    for i in range(num_pdfs):
-                        output_pdf = f"generated_pdf_{i+1}.pdf"
-                        futures.append(executor.submit(process_pdf_from_s3_with_mapped_content, bucket_name, temp_pdf_path, output_pdf, top_k, top_p, temperature))
+        if st.button("Generate PDFs"):
+            with st.spinner("Generating PDFs..."):
+                bucket_name = 'your-bucket-name'  # Set your S3 bucket name
 
-                    for future in as_completed(futures):
-                        result = future.result()
-                        output_files.append(result)
+                def generate_pdfs(num_pdfs):
+                    output_files = []
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        futures = []
+                        for i in range(num_pdfs):
+                            output_pdf = f"generated_pdf_{i+1}.pdf"
+                            futures.append(executor.submit(process_pdf_from_s3_with_mapped_content, bucket_name, temp_pdf_path, output_pdf, top_k, top_p, temperature))
 
-                return output_files
+                        for future in as_completed(futures):
+                            result = future.result()
+                            output_files.append(result)
 
-            generated_pdfs = generate_pdfs(num_pdfs)
+                    return output_files
 
-            for i, pdf_file in enumerate(generated_pdfs):
-                st.success(f"PDF {i+1} generated successfully!")
-                with open(pdf_file, "rb") as file:
-                    st.download_button(f"Download PDF {i+1}", file, f"generated_pdf_{i+1}.pdf", mime="application/pdf")
+                generated_pdfs = generate_pdfs(num_pdfs)
+
+                for i, pdf_file in enumerate(generated_pdfs):
+                    st.success(f"PDF {i+1} generated successfully!")
+                    with open(pdf_file, "rb") as file:
+                        st.download_button(f"Download PDF {i+1}", file, f"generated_pdf_{i+1}.pdf", mime="application/pdf")
+
+# If user selects Tabular Data Generation
+else:
+    st.write("### Tabular Data Generation")
+    
+    # Sidebar for data-related parameters
+    st.sidebar.title("Generation Options")
+    st.sidebar.header("Adjust Data Generation Parameters")
+    rows = st.sidebar.slider("Number of Rows", min_value=10, max_value=1000, value=100, step=10)
+    columns = st.sidebar.slider("Number of Columns", min_value=2, max_value=50, value=5, step=1)
+    
+    if st.button("Generate Data"):
+        with st.spinner("Generating Data..."):
