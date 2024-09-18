@@ -169,19 +169,18 @@ st.write("Upload a PDF, adjust LLM hyperparameters, and generate new PDFs.")
 # Step 1: Upload PDF
 uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
 
+# Sidebar for Hyperparameters
+st.sidebar.header("Adjust LLM Hyperparameters")
+top_k = st.sidebar.slider("Top K", min_value=1, max_value=1000, value=250, step=1)
+top_p = st.sidebar.slider("Top P", min_value=0.0, max_value=1.0, value=0.9, step=0.01)
+temperature = st.sidebar.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
+num_pdfs = st.sidebar.slider("Number of PDFs to Generate", min_value=1, max_value=10, value=1)
+
 if uploaded_file is not None:
     temp_pdf_path = "temp_uploaded.pdf"
     with open(temp_pdf_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
     st.success("PDF uploaded successfully!")
-
-    # Step 2: Adjust LLM Hyperparameters
-    st.sidebar.header("Adjust LLM Hyperparameters")
-    top_k = st.sidebar.slider("Top K", min_value=1, max_value=1000, value=250, step=1)
-    top_p = st.sidebar.slider("Top P", min_value=0.0, max_value=1.0, value=0.9, step=0.01)
-    temperature = st.sidebar.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
-
-    num_pdfs = st.sidebar.slider("Number of PDFs to Generate", min_value=1, max_value=10, value=1)
 
     if st.button("Generate PDFs"):
         with st.spinner("Generating PDFs..."):
