@@ -1,6 +1,8 @@
 import pandas as pd
 import boto3
 import json
+from botocore.config import Config
+from langchain import BedrockChat  # Assuming you are using Langchain for Claude 3 integration
 
 # Function to extract schema
 def extract_csv_schema(file_path):
@@ -15,29 +17,31 @@ def extract_csv_schema(file_path):
     schema_readable = {col: str(dtype) for col, dtype in schema.items()}
     return schema_readable
 
-# Function to set up Claude 3 Model
-def setup_claude_model(bedrock_runtime_region, bedrock_endpoint_url, model_identifier):
+# Function to load the Claude 3 Model with top_k, top_p, and temperature parameters
+def load_model(top_k, top_p, temperature):
     """
-    This function sets up the Claude 3 model using Amazon Bedrock.
-
-    :param bedrock_runtime_region: The AWS region for Bedrock runtime
-    :param bedrock_endpoint_url: The Bedrock endpoint URL
-    :param model_identifier: The Claude 3 model identifier for loading the model
-    :return: A dictionary containing Claude 3 model setup information
-    """
-    bedrock_client = boto3.client(
-        service_name='bedrock-runtime',
-        region_name=bedrock_runtime_region,
-        endpoint_url=bedrock_endpoint_url
-    )
+    This function sets up the Claude 3 model using Amazon Bedrock with user-specified hyperparameters.
     
-    # Return the model payload for Claude 3 setup
-    claude_model = {
-        'modelIdentifier': model_identifier,
-        'client': bedrock_client
+    :param top_k: Number of highest probability vocabulary tokens to keep for top-k sampling
+    :param top_p: Cumulative probability for top-p sampling
+    :param temperature: Sampling temperature
+    :return: The loaded Claude 3 model
+    """
+    config = Config(read_timeout=1000)
+    bedrock_runtime = boto3.client(service_name='bedrock-runtime', region_name='us-east-1', config=config)
+
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    
+    model_kwargs = { 
+        "max_tokens": 100000,
+        "temperature": temperature,
+        "top_k": top_k,
+        "top_p": top_p,
+        "stop_sequences": ["\n\nHuman"],  # Specify the stop sequence if necessary
     }
     
-    return claude_model
+    model = BedrockChat(client=bedrock_runtime, model_id=model_id, model_kwargs=model_kwargs)
+    return model
 
 # Function to estimate the number of examples that can fit within the context window using character approximation
 def estimate_max_examples(csv_data, max_context_tokens, prompt_tokens, response_token_buffer=0.3):
@@ -99,7 +103,7 @@ def generate_new_observation(claude_model, schema, examples):
     """
     Invokes Claude 3 to generate a new observation based on the schema and examples provided.
     
-    :param claude_model: The Claude 3 model setup returned by setup_claude_model function.
+    :param claude_model: The Claude 3 model setup returned by load_model function.
     :param schema: The schema dictionary defining the column names and data types.
     :param examples: A DataFrame containing the examples to provide to Claude 3.
     :return: A dictionary containing the generated observation.
@@ -118,8 +122,8 @@ def generate_new_observation(claude_model, schema, examples):
     prompt += "\nBased on the schema and examples, generate a new observation in the same format."
     
     # Invoke Claude 3 using the Bedrock client
-    response = claude_model['client'].invoke_model(
-        modelId=claude_model['modelIdentifier'],
+    response = claude_model.client.invoke_model(
+        modelId=claude_model.model_id,
         contentType="text/plain",
         accept="application/json",
         body=prompt.encode('utf-8')
@@ -135,7 +139,7 @@ def generate_multiple_observations(claude_model, schema, csv_data, num_observati
     """
     Generates multiple observations by looping over the generation process, stores them in a DataFrame, and saves to CSV.
     
-    :param claude_model: The Claude 3 model setup returned by setup_claude_model function.
+    :param claude_model: The Claude 3 model setup returned by load_model function.
     :param schema: The schema dictionary defining the column names and data types.
     :param csv_data: The original dataset.
     :param num_observations: The number of new observations to generate.
@@ -172,9 +176,10 @@ def generate_multiple_observations(claude_model, schema, csv_data, num_observati
 
 # Example usage of all functions
 file_path = "your_csv_file.csv"
-bedrock_runtime_region = "us-west-2"  # Example region
-bedrock_endpoint_url = "https://your-bedrock-endpoint"  # Example endpoint
-model_identifier = "claude-3"  # Claude 3 model identifier
+bedrock_runtime_region = "us-east-1"  # Update region
+top_k = 50  # Example top_k value
+top_p = 0.9  # Example top_p value
+temperature = 0.7  # Example temperature value
 num_observations = 5  # Number of new observations to generate
 output_csv = "generated_observations.csv"  # Output file path for saving the generated observations
 
@@ -182,9 +187,9 @@ output_csv = "generated_observations.csv"  # Output file path for saving the gen
 schema = extract_csv_schema(file_path)
 print("Schema:", schema)
 
-# Step 2: Setup Claude 3 Model
-claude_model = setup_claude_model(bedrock_runtime_region, bedrock_endpoint_url, model_identifier)
-print("Claude 3 Model Setup:", claude_model)
+# Step 2: Load the Claude 3 Model with hyperparameters
+claude_model = load_model(top_k=top_k, top_p=top_p, temperature=temperature)
+print("Claude 3 Model Loaded:", claude_model)
 
 # Step 3: Load the CSV Data
 csv_data = pd.read_csv(file_path)
