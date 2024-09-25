@@ -1,0 +1,174 @@
+import pandas as pd
+import boto3
+import json
+from botocore.config import Config
+from langchain import BedrockChat
+
+# Function to extract schema
+def extract_csv_schema(file_path):
+    """
+    This function reads a CSV file and extracts the schema (data types) of each column.
+    """
+    df = pd.read_csv(file_path)
+    schema = dict(df.dtypes)
+    return schema
+
+# Function to load the Claude 3 Model with top_k, top_p, and temperature parameters
+def load_model(top_k, top_p, temperature):
+    """
+    This function sets up the Claude 3 model using Amazon Bedrock with user-specified hyperparameters.
+    """
+    config = Config(read_timeout=1000)
+    bedrock_runtime = boto3.client(service_name='bedrock-runtime', region_name='us-east-1', config=config)
+
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    
+    model_kwargs = { 
+        "max_tokens": 100000,
+        "temperature": temperature,
+        "top_k": top_k,
+        "top_p": top_p,
+        "stop_sequences": ["\n\nHuman"],
+    }
+    
+    model = BedrockChat(client=bedrock_runtime, model_id=model_id, model_kwargs=model_kwargs)
+    return model
+
+# Function to estimate max examples based on context window and 60% of the dataset
+def max_examples(csv_data, max_context_tokens, prompt_tokens, response_token_buffer=0.3):
+    """
+    This function estimates the maximum number of examples that can fit into Claude 3's context window,
+    and calculates the number of observations that correspond to 60% of the dataset.
+    
+    :param csv_data: The DataFrame containing the original data.
+    :param max_context_tokens: The maximum context window size for Claude 3.
+    :param prompt_tokens: The number of tokens used by the prompt (instructions, etc.).
+    :param response_token_buffer: The proportion of the context window reserved for the response.
+    :return: The smaller of the number of examples that fit in the context window or 60% of the dataset.
+    """
+    # 1. Estimate the max number of examples that can fit in the context window
+    reserved_tokens_for_response = max_context_tokens * response_token_buffer
+    available_tokens = max_context_tokens - reserved_tokens_for_response
+    tokens_per_character = 1 / 4  # Approximation: 1 token is roughly 4 characters
+    total_tokens_used = prompt_tokens
+    max_examples_context_window = 0
+
+    # Estimate tokens used by each example
+    for _, row in csv_data.iterrows():
+        example_text = str(row.to_dict())
+        example_characters = len(example_text)
+        example_tokens = example_characters * tokens_per_character
+
+        if total_tokens_used + example_tokens > available_tokens:
+            break
+
+        total_tokens_used += example_tokens
+        max_examples_context_window += 1
+
+    # 2. Calculate the number of observations corresponding to 60% of the original dataset
+    max_examples_60_percent = int(0.6 * len(csv_data))
+
+    # 3. Return the smaller of the two values
+    return min(max_examples_context_window, max_examples_60_percent)
+
+# Function to generate examples based on the max examples
+def generate_examples(csv_data, num_examples):
+    """
+    Randomly samples 'num_examples' observations from the original dataset.
+    
+    :param csv_data: The DataFrame containing the original data.
+    :param num_examples: The number of examples to randomly sample.
+    :return: A DataFrame containing the sampled examples.
+    """
+    return csv_data.sample(n=num_examples, random_state=42)
+
+# Function to format examples as 'col 1: value 1, col 2: value 2'
+def format_example(row):
+    """
+    Formats a row of the DataFrame into the format 'col 1: value 1, col 2: value 2'.
+    """
+    return ', '.join([f'{col}: {value}' for col, value in row.items()])
+
+# Function to invoke Claude 3 to generate a single observation
+def generate_single_observation(claude_model, schema, examples):
+    """
+    Invokes Claude 3 to generate a single observation in a single request based on the schema and examples provided.
+    """
+    prompt = "The following is a schema of a dataset:\n"
+    prompt += f"{', '.join([f'{col}: {dtype}' for col, dtype in schema.items()])}\n\n"
+    
+    prompt += f"Here are {len(examples)} examples from the dataset:\n"
+    
+    for i, (_, row) in enumerate(examples.iterrows(), 1):
+        prompt += f"Example {i}:\n{format_example(row)}\n"
+    
+    prompt += "\nBased on the schema and examples, generate exactly 1 new observation in the same format."
+    prompt += " Please introduce variety into the new observation. Make it unique and random within the allowed schema constraints."
+
+    response = claude_model.client.invoke_model(
+        modelId=claude_model.model_id,
+        contentType="text/plain",
+        accept="application/json",
+        body=prompt.encode('utf-8')
+    )
+    
+    generated_observation = response['body'].read().decode('utf-8').strip()
+
+    # Parse the generated observation
+    obs_dict = {item.split(":")[0].strip(): item.split(":")[1].strip() for item in generated_observation.split(",")}
+    
+    return obs_dict
+
+# Function to generate single observations and save them to a DataFrame
+def generate_observations_in_batches(claude_model, schema, csv_data, num_observations, max_context_tokens, prompt_tokens, output_csv):
+    """
+    Generates one observation per loop, stores them in a DataFrame, and saves to CSV.
+    """
+    all_observations = []
+
+    for _ in range(num_observations):
+        # Step 1: Get the max number of examples that can fit in the context window or 60% of the dataset
+        num_examples = max_examples(csv_data, max_context_tokens, prompt_tokens)
+
+        # Step 2: Generate examples by randomly sampling the dataset
+        selected_samples = generate_examples(csv_data, num_examples)
+
+        # Step 3: Generate one new observation using Claude 3
+        new_observation = generate_single_observation(claude_model, schema, selected_samples)
+        print(f"Generated Observation:\n{new_observation}")
+        
+        all_observations.append(new_observation)
+    
+    # Convert the list of observations into a DataFrame
+    observations_df = pd.DataFrame(all_observations)
+    
+    # Save the DataFrame to CSV
+    observations_df.to_csv(output_csv, index=False)
+    
+    return observations_df
+
+# Example usage of all functions
+file_path = "your_csv_file.csv"
+top_k = 50
+top_p = 0.9
+temperature = 1.0  # Increase the temperature for more creativity
+num_observations = 20  # Number of observations to generate
+output_csv = "generated_observations.csv"
+
+# Step 1: Extract CSV Schema
+schema = extract_csv_schema(file_path)
+print("Schema:", schema)
+
+# Step 2: Load the Claude 3 Model with hyperparameters
+claude_model = load_model(top_k=top_k, top_p=top_p, temperature=temperature)
+print("Claude 3 Model Loaded:", claude_model)
+
+# Step 3: Load the CSV Data
+csv_data = pd.read_csv(file_path)
+
+# Step 4: Generate Observations One at a Time and Save to CSV
+max_context_tokens = 100000  # Example context window size (Claude 3's token limit)
+prompt_tokens = 1000  # Estimate for tokens used by the prompt
+
+generated_observations_df = generate_observations_in_batches(claude_model, schema, csv_data, num_observations, max_context_tokens, prompt_tokens, output_csv)
+print(f"Generated Observations DataFrame:\n{generated_observations_df}")
