@@ -1,0 +1,61 @@
+def create_prompt_template():
+    template = """
+    You are a helpful AI assistant for creating new datasets. 
+    Your task is to generate new observations based on the provided examples and schema.
+    The new observations should be similar to the examples.
+
+    **Numeric Data**: 
+    - Ensure that the numeric values in the generated data follow the same distributions as provided in the schema.
+    - For each numeric column, generate values that adhere to the following properties from the schema: mean, standard deviation, minimum, maximum, and percentiles (25th, 50th, and 75th).
+    - The generated values should fall within the range of the original data (min and max) and match the distribution described by the schema.
+
+    **Categorical Data**: 
+    - Ensure that the frequency distribution of categorical values matches the distribution provided in the schema.
+    - The proportion of each category (e.g., Male/Female) should be preserved based on the frequencies in the schema.
+
+    The formatting of the new observations should match the formatting of the examples: 
+    column 1: value 1, column 2: value 2...column n: value n.
+
+    **Examples**:
+    {examples}
+
+    **Schema**:
+    {schema}
+    
+    **Count**: Generate {count} new observations.
+
+    Only return the new observations, do not include any explanation.
+    """
+    
+    prompt = PromptTemplate(
+        template=template,
+        input_variables=["examples", "schema", "count"]
+    )
+
+    return prompt
+
+def generate_schema(df):
+    schema = {}
+
+    # For numeric columns
+    numeric_columns = df.select_dtypes(include=[np.number]).columns
+    for col in numeric_columns:
+        col_stats = {
+            "mean": df[col].mean(),
+            "std": df[col].std(),
+            "min": df[col].min(),
+            "max": df[col].max(),
+            "25th_percentile": df[col].quantile(0.25),
+            "50th_percentile": df[col].quantile(0.50),  # Median
+            "75th_percentile": df[col].quantile(0.75)
+        }
+        schema[col] = col_stats
+
+    # For categorical columns
+    categorical_columns = df.select_dtypes(include=['object', 'category']).columns
+    for col in categorical_columns:
+        value_counts = df[col].value_counts(normalize=True)  # Get frequency distribution
+        col_stats = value_counts.to_dict()  # Convert to dictionary format
+        schema[col] = col_stats
+
+    return schema
