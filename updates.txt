@@ -5,13 +5,17 @@ def create_prompt_template():
     The new observations should be similar to the examples.
 
     **Numeric Data**: 
-    - Ensure that the numeric values in the generated data follow the same distributions as provided in the schema.
-    - For each numeric column, generate values that adhere to the following properties from the schema: mean, standard deviation, minimum, maximum, and percentiles (25th, 50th, and 75th).
+    - For each numeric column, ensure that the generated values follow the properties from the schema: mean, standard deviation, minimum, maximum, and percentiles (25th, 50th, and 75th).
     - The generated values should fall within the range of the original data (min and max) and match the distribution described by the schema.
 
     **Categorical Data**: 
-    - Ensure that the frequency distribution of categorical values matches the distribution provided in the schema.
+    - For each categorical column, ensure that the frequency distribution of the generated data matches the distribution provided in the schema.
     - The proportion of each category (e.g., Male/Female) should be preserved based on the frequencies in the schema.
+
+    **Free-Form Text**:
+    - For free-form text columns, generate text that is similar in style and structure to the examples provided.
+    - Ensure that the generated text has a length that falls within the range indicated in the schema.
+    - The average length of the generated text should be close to the average length provided in the schema.
 
     The formatting of the new observations should match the formatting of the examples: 
     column 1: value 1, column 2: value 2...column n: value n.
@@ -33,6 +37,7 @@ def create_prompt_template():
     )
 
     return prompt
+
 
 import pandas as pd
 import numpy as np
