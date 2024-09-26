@@ -34,6 +34,10 @@ def create_prompt_template():
 
     return prompt
 
+import pandas as pd
+import numpy as np
+
+# Function to generate schema, now handling numeric, categorical, and free-form text
 def generate_schema(df):
     schema = {}
 
@@ -41,6 +45,7 @@ def generate_schema(df):
     numeric_columns = df.select_dtypes(include=[np.number]).columns
     for col in numeric_columns:
         col_stats = {
+            "data_type": "numeric",
             "mean": df[col].mean(),
             "std": df[col].std(),
             "min": df[col].min(),
@@ -54,8 +59,38 @@ def generate_schema(df):
     # For categorical columns
     categorical_columns = df.select_dtypes(include=['object', 'category']).columns
     for col in categorical_columns:
-        value_counts = df[col].value_counts(normalize=True)  # Get frequency distribution
-        col_stats = value_counts.to_dict()  # Convert to dictionary format
-        schema[col] = col_stats
+        if df[col].nunique() < 50:  # Treat columns with a small number of unique values as categorical
+            value_counts = df[col].value_counts(normalize=True)
+            col_stats = {
+                "data_type": "categorical",
+                "distribution": value_counts.to_dict()
+            }
+            schema[col] = col_stats
+
+    # For free-form text columns (treated as 'object' but with high uniqueness)
+    text_columns = df.select_dtypes(include=['object']).columns
+    for col in text_columns:
+        if df[col].nunique() > 50:  # Assume high uniqueness indicates free-form text
+            text_lengths = df[col].dropna().apply(len)  # Calculate the length of each text entry
+            col_stats = {
+                "data_type": "text",
+                "average_length": text_lengths.mean(),
+                "min_length": text_lengths.min(),
+                "max_length": text_lengths.max(),
+                "sample_text": df[col].dropna().sample(3).tolist()  # Provide a few examples
+            }
+            schema[col] = col_stats
 
     return schema
+
+# Example Usage:
+file_path = "tips.csv"
+csv_data = pd.read_csv(file_path)
+
+# Generate the schema for numeric, categorical, and text columns
+schema = generate_schema(csv_data)
+
+# Convert to JSON format for easy reading or passing to the model
+import json
+schema_json = json.dumps(schema, indent=4)
+print(schema_json)
