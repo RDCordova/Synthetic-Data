@@ -1,0 +1,329 @@
+import streamlit as st
+import boto3
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from botocore.config import Config
+from langchain_community.chat_models import BedrockChat
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+import os
+import time
+import zipfile
+import pandas as pd
+import numpy as np
+import math
+from io import StringIO
+
+# Reuse your existing functions from the provided code
+
+# PDF Generation Section
+# (Same as in your original code, no changes)
+
+def start_textract_job(bucket_name, document_name):
+    textract = boto3.client('textract')
+    response = textract.start_document_analysis(
+        DocumentLocation={'S3Object': {'Bucket': bucket_name, 'Name': document_name}},
+        FeatureTypes=['TABLES', 'FORMS']
+    )
+    return response['JobId']
+
+def check_textract_job_status(job_id):
+    textract = boto3.client('textract')
+    while True:
+        response = textract.get_document_analysis(JobId=job_id)
+        status = response['JobStatus']
+        if status == 'SUCCEEDED':
+            return response
+        elif status == 'FAILED':
+            raise Exception(f"Textract job failed: {response}")
+        time.sleep(5)
+
+def extract_text_and_tables_with_layout_from_s3_async(bucket_name, document_name):
+    job_id = start_textract_job(bucket_name, document_name)
+    response = check_textract_job_status(job_id)
+    blocks = response['Blocks']
+    text_blocks = []
+    table_blocks = []
+
+    def extract_table_data_with_layout(relationship_block, block_map):
+        table_data = []
+        for relationship in relationship_block['Relationships']:
+            if relationship['Type'] == 'CHILD':
+                for child_id in relationship['Ids']:
+                    cell_block = block_map[child_id]
+                    if cell_block['BlockType'] == 'CELL':
+                        cell_text = cell_block.get('Text', "")
+                        bbox = cell_block['Geometry']['BoundingBox']
+                        table_data.append({
+                            'text': cell_text,
+                            'bbox': bbox
+                        })
+        return table_data
+
+    block_map = {block['Id']: block for block in blocks}
+
+    for block in blocks:
+        if block['BlockType'] == 'LINE':
+            bbox = block['Geometry']['BoundingBox']
+            text_blocks.append({'text': block['Text'], 'bbox': bbox})
+        elif block['BlockType'] == 'TABLE':
+            table_data = extract_table_data_with_layout(block, block_map)
+            table_blocks.append(table_data)
+
+    return text_blocks, table_blocks
+
+def load_model(top_k, top_p, temperature):
+    config = Config(read_timeout=1000)
+    bedrock_runtime = boto3.client(service_name='bedrock-runtime', region_name='us-east-1', config=config)
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    model_kwargs = {
+        "max_tokens": 100000,
+        "temperature": temperature,
+        "top_k": top_k,
+        "top_p": top_p,
+        "stop_sequences": ["\n\nHuman"],
+    }
+    model = BedrockChat(client=bedrock_runtime, model_id=model_id, model_kwargs=model_kwargs)
+    return model
+
+def generate_new_content_with_mapping(text_blocks, model):
+    new_text_blocks = []
+    def process_text_block(block):
+        prompt = f"Rewrite the following content. Only return the new version, do not include any sort of explanations or prefixes. For example do not include phrases like Here is a new version of the content, preserving the original format :\n\n{block['text']}"
+        response = model.invoke(prompt).content
+        return {'text': response, 'bbox': block['bbox']}
+    
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(process_text_block, block) for block in text_blocks]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Generating new content", unit="block"):
+            new_text_blocks.append(future.result())
+    
+    return new_text_blocks
+
+def create_pdf_with_mapped_content(mapped_text_blocks, tables, output_file):
+    c = canvas.Canvas(output_file, pagesize=letter)
+    width, height = letter
+    current_y = height - 50
+    def scale_bbox_to_page(bbox, width, height):
+        x = bbox['Left'] * width
+        y = height - (bbox['Top'] * height)
+        w = bbox['Width'] * width
+        h = bbox['Height'] * height
+        return x, y, w, h
+    for block in mapped_text_blocks:
+        text = block['text']
+        bbox = block['bbox']
+        x, y, w, h = scale_bbox_to_page(bbox, width, height)
+        if current_y - h < 50:
+            c.showPage()
+            current_y = height - 50
+        c.setFont("Helvetica", 10)
+        c.drawString(x, current_y, text)
+        current_y -= h + 10
+    for table in tables:
+        table_height = sum([cell['bbox']['Height'] * height for cell in table])
+        if current_y - table_height < 50:
+            c.showPage()
+            current_y = height - 50
+        for cell in table:
+            cell_text = cell['text']
+            bbox = cell['bbox']
+            x, y, w, h = scale_bbox_to_page(bbox, width, height)
+            if current_y - h < 50:
+                c.showPage()
+                current_y = height - 50
+            c.setFont("Helvetica", 10)
+            c.drawString(x, current_y, cell_text)
+            c.rect(x, current_y - h, w, h)
+            current_y -= h + 10
+    c.save()
+
+def create_zip_from_pdfs(pdf_files, output_zip_file):
+    with zipfile.ZipFile(output_zip_file, 'w') as zipf:
+        for pdf_file in pdf_files:
+            zipf.write(pdf_file, os.path.basename(pdf_file))
+
+def process_pdf_from_s3_with_mapped_content(bucket_name, document_name, output_pdf, top_k, top_p, temperature):
+    extracted_text_blocks, table_blocks = extract_text_and_tables_with_layout_from_s3_async(bucket_name, document_name)
+    llm = load_model(top_k, top_p, temperature)
+    mapped_text_blocks = generate_new_content_with_mapping(extracted_text_blocks, llm)
+    create_pdf_with_mapped_content(mapped_text_blocks, table_blocks, output_pdf)
+
+def get_s3_client():
+    return boto3.client('s3',region='us-east-1')
+
+# PDF Generation UI
+st.set_page_config(page_title="SyntheSys: Content Generation", page_icon="🧊", layout="centered")
+st.title("SyntheSys: Content Generation")
+st.write("Select the data type to generate (PDF or Tabular) then upload your sample file")
+st.markdown("---")
+
+# Step 1: User selects between PDF or Tabular Data Generation
+generation_type = st.radio("Select Generation Type", ["Generate PDF(s)", "Generate Tabular Data"])
+
+def get_s3():
+    return boto3.client('s3')
+
+def upload_file_to_s3(file, bucket_name, object_name):
+    s3 = get_s3()
+    try: 
+        s3.upload_fileobj(file, bucket_name, object_name)
+    except NoCredentialsError:
+        st.error("CA")
+    except ClientError:
+        st.error("Fail")
+
+# PDF Generation Section
+if generation_type == "Generate PDF(s)":
+    st.write("### PDF Generation")
+    uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+    st.sidebar.title("Generation Options")
+    num_pdfs = st.sidebar.slider("Number of PDFs to Generate", min_value=1, max_value=10, value=1)
+    st.sidebar.header("Adjust PDF Generation Parameters")
+    top_k = st.sidebar.slider("Top K (Token Sampling)", min_value=1, max_value=1000, value=250, step=1)
+    top_p = st.sidebar.slider("Top P (Probability Threshold)", min_value=0.0, max_value=1.0, value=0.9, step=0.01)
+    temperature = st.sidebar.slider("Temperature (Creativity Control)", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
+
+    if uploaded_file is not None:
+        bucket_name = 'a31-cd'
+        object_name = uploaded_file.name
+        upload_file_to_s3(uploaded_file, bucket_name, object_name)
+        st.success("PDF uploaded successfully!")
+        if st.button("Generate PDFs"):
+            with st.spinner("Generating Data...PDFs..."):
+                def generate_pdfs(num_pdfs):
+                    output_files = []
+                    for i in range(num_pdfs):
+                        output_pdf = f"generated_pdf_{i+1}.pdf"
+                        process_pdf_from_s3_with_mapped_content(bucket_name, object_name, output_pdf, top_k, top_p, temperature)
+                        output_files.append(output_pdf)
+                    return output_files
+                generated_pdfs = generate_pdfs(num_pdfs)
+                if num_pdfs > 1:
+                    zip_name = "generated_pdfs.zip"
+                    create_zip_from_pdfs(generated_pdfs,zip_name)
+                    with open(zip_name, "rb") as file:
+                        st.download_button(f"Download All PDFs as {zip_name}", file, zip_name, mime="application/zip")
+                else:
+                    pdf_file = generated_pdfs[0]
+                    st.success(f"PDF generated successfully")
+                    with open(pdf_file, "rb") as file:
+                        st.download_button(f"Download PDF", file, pdf_file, mime="application/zip")
+
+# Tabular Data Generation Section (Enhanced)
+else:
+    st.write("### Tabular Data Generation")
+    uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
+    st.sidebar.title("Generation Options")
+    num_obs = st.sidebar.slider("Number of Observations to Generate", min_value=10, max_value=10000, value=100, step=10)
+    top_k = st.sidebar.slider("Top K (Token Sampling)", min_value=1, max_value=1000, value=250, step=1)
+    top_p = st.sidebar.slider("Top P (Probability Threshold)", min_value=0.0, max_value=1.0, value=0.9, step=0.01)
+    temperature = st.sidebar.slider("Temperature (Creativity Control)", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
+
+    if uploaded_file is not None:
+        bucket_name = 'a31-cd'
+        object_name = uploaded_file.name
+        upload_file_to_s3(uploaded_file, bucket_name, object_name)
+        st.success("CSV uploaded successfully!")
+
+        if st.button("Generate Data"):
+            # Load the uploaded CSV from S3
+            def read_csv_from_s3(bucket_name, key):
+                s3 = boto3.client('s3')
+                obj = s3.get_object(Bucket=bucket_name, Key=key)
+                df = pd.read_csv(StringIO(obj['Body'].read().decode('utf-8')))
+                return df
+
+            # Generate new synthetic observations using the enhanced logic
+            def generate_schema(df):
+                schema = {}
+                numeric_columns = df.select_dtypes(include=[np.number]).columns
+                for col in numeric_columns:
+                    col_stats = {
+                        "data_type": "numeric",
+                        "mean": df[col].mean(),
+                        "std": df[col].std(),
+                        "min": df[col].min(),
+                        "max": df[col].max(),
+                        "25th_percentile": df[col].quantile(0.25),
+                        "50th_percentile": df[col].quantile(0.50),  # Median
+                        "75th_percentile": df[col].quantile(0.75)
+                    }
+                    schema[col] = col_stats
+
+                categorical_columns = df.select_dtypes(include=['object', 'category']).columns
+                for col in categorical_columns:
+                    if df[col].nunique() < 50:
+                        value_counts = df[col].value_counts(normalize=True)
+                        col_stats = {
+                            "data_type": "categorical",
+                            "distribution": value_counts.to_dict()
+                        }
+                        schema[col] = col_stats
+
+                text_columns = df.select_dtypes(include=['object']).columns
+                for col in text_columns:
+                    if df[col].nunique() > 50:
+                        text_lengths = df[col].dropna().apply(len)
+                        col_stats = {
+                            "data_type": "text",
+                            "average_length": text_lengths.mean(),
+                            "min_length": text_lengths.min(),
+                            "max_length": text_lengths.max(),
+                            "sample_text": df[col].dropna().sample(3).tolist()
+                        }
+                        schema[col] = col_stats
+
+                return schema
+
+            def load_model_for_tabular(top_k, top_p, temperature):
+                config = Config(read_timeout=1000)
+                bedrock_runtime = boto3.client(service_name='bedrock-runtime', region_name='us-east-1', config=config)
+                model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+                model_kwargs = {
+                    "max_tokens": 200000,
+                    "temperature": temperature,
+                    "top_k": top_k,
+                    "top_p": top_p,
+                    "stop_sequences": ["\n\nHuman"]
+                }
+                model = BedrockChat(client=bedrock_runtime, model_id=model_id, model_kwargs=model_kwargs)
+                return model
+
+            def fill_missing_cat(new_data, schema, col):
+                distribution = schema[col]['distribution']
+                categories = list(distribution.keys())
+                probabilities = list(distribution.values())
+                missing_idx = new_data[new_data[col].isnull()].index
+                sampled_categories = np.random.choice(categories, size=len(missing_idx), p=probabilities)
+                new_data.loc[missing_idx, col] = sampled_categories
+                return new_data
+
+            # Read CSV data and generate synthetic data
+            df = read_csv_from_s3(bucket_name, object_name)
+            schema = generate_schema(df)
+            llm = load_model_for_tabular(top_k, top_p, temperature)
+
+            # Assuming generate_combined_data function
+            # Replace this with the appropriate logic for generating the combined data using LLM
+
+            generated_df = generate_combined_data(df, num_obs, schema, llm)
+
+            # Fill missing values in the generated data
+            types = dict(df.dtypes)
+            for column, dtype in types.items():
+                try:
+                    generated_df[column] = generated_df[column].astype(dtype)
+                except ValueError:
+                    st.warning(f"Error converting {column} to {dtype}")
+
+            cat_cols = df.select_dtypes(exclude=[np.number]).columns
+            for col in cat_cols:
+                generated_df = fill_missing_cat(generated_df, schema, col)
+
+            # Convert DataFrame to CSV for download
+            def convert_to_csv(df):
+                return df.to_csv(index=False).encode('utf-8')
+
+            csv_download = convert_to_csv(generated_df)
+            st.download_button("Download Generated Data", csv_download, "generated_data.csv", mime="text/csv")
