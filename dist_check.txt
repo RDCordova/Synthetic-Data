@@ -1,0 +1,34 @@
+def distribution_check_summary(original_data,new_data, p_value_threshold=0.05):
+    results = []
+    num_cols = original_data.select_dtypes(include=[np.number]).columns
+    cat_cols = original_data.select_dtypes(exclude=[np.number]).columns
+    
+    for col in num_cols: 
+        ks_stat, p_value = ks_2samp(original_data[col], new_data[col])
+        result = "Pass" if p_value > p_value_threshold else "Fail"
+        
+        results.append({'Column': col,
+                        'Type': 'Numeric',
+                        'P-Value': p_value,
+                        'Test': 'KS Test',
+                        'Result': result
+                       }
+            )
+        
+    for col in cat_cols: 
+        original_count = original_data[col].value_counts()
+        new_count = new_data[col].value_counts()
+        
+        counts = pd.DataFrame({'original': original_count, 'generated': new_count}).fillna(0)
+        chi2_stat, p_value, dof, ex = chi2_contingency(counts.T)
+        result = "Pass" if p_value > p_value_threshold else "Fail"
+        
+        results.append({'Column': col,
+                        'Type': 'Categorical',
+                        'P-Value': p_value,
+                        'Test': 'Chai-Square Test',
+                        'Result': result
+                       }
+            ) 
+    result_df = pd.DataFrame(results)
+    return result_df
