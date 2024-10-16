@@ -21,15 +21,23 @@ def load_model(top_k, top_p, temperature):
     return model
 
 # Textract-related functions
-def get_textract_results(document_path):
+def get_textract_results_from_s3(bucket_name, s3_key):
     """
-    Extract text blocks using Textract
+    Extract text blocks from a PDF stored in S3 using Textract.
+    Here we reference the S3 object directly in the Textract request.
     """
-    with open(document_path, 'rb') as document:
-        response = textract.analyze_document(
-            Document={'Bytes': document.read()},
-            FeatureTypes=["TABLES", "FORMS"]
-        )
+    # Use Textract to analyze the document stored in S3
+    textract = boto3.client('textract')
+    response = textract.analyze_document(
+        Document={
+            'S3Object': {
+                'Bucket': bucket_name,
+                'Name': s3_key
+            }
+        },
+        FeatureTypes=["TABLES", "FORMS"]
+    )
+    
     return response
 
 def is_heading(block):
@@ -107,13 +115,13 @@ def create_pdf(sections, output_pdf_path):
     # Save the new PDF
     pdf.output(output_pdf_path)
 
-# Main function to process the document and rewrite the content
-def process_and_rewrite_document(document_path, top_k, top_p, temperature, user_instructions, output_pdf_path):
+# Main function to process the document from S3, rewrite the content, and create a new PDF
+def process_and_rewrite_document_s3(bucket_name, s3_key, top_k, top_p, temperature, user_instructions, output_pdf_path):
     # Load the Claude 3 model with your parameters
     model = load_model(top_k, top_p, temperature)
 
-    # Extract document sections with Textract
-    response = get_textract_results(document_path)
+    # Extract document sections from S3 using Textract
+    response = get_textract_results_from_s3(bucket_name, s3_key)
     
     # Collect all text blocks (lines)
     blocks = response['Blocks']
@@ -130,7 +138,8 @@ def process_and_rewrite_document(document_path, top_k, top_p, temperature, user_
     create_pdf(sections, output_pdf_path)
 
 if __name__ == "__main__":
-    document_path = "path_to_your_document.pdf"  # Replace with your document path
+    bucket_name = "your-s3-bucket-name"  # Replace with your S3 bucket name
+    s3_key = "path_to_your_document.pdf"  # Replace with your S3 PDF key (path in S3)
     top_k = 50  # Example value
     top_p = 0.9  # Example value
     temperature = 0.7  # Example value
@@ -138,7 +147,9 @@ if __name__ == "__main__":
     # User input on the modification they want to apply
     user_instructions = "Change all addresses to a generic address."
     
-    # Path for the output PDF
+    # Path for the output PDF (locally saved)
     output_pdf_path = "path_to_new_document.pdf"
     
-    process_and_rewrite_document(document_path, top_k, top_p, temperature, user_instructions, output_pdf_path)
+    # Process the document from S3 and generate the new PDF
+    process_and_rewrite_document_s3(bucket_name, s3_key, top_k, top_p, temperature, user_instructions, output_pdf_path)
+
