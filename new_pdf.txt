@@ -1,0 +1,113 @@
+import boto3
+from botocore.config import Config
+
+# Keeping your original Claude 3 model definition
+def load_model(top_k, top_p, temperature):
+    config = Config(read_timeout=1000)
+    bedrock_runtime = boto3.client(service_name='bedrock-runtime', region_name='us-east-1', config=config)
+
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+    
+    model_kwargs = { 
+        "max_tokens": 100000,
+        "temperature": temperature,
+        "top_k": top_k,
+        "top_p": top_p,
+        "stop_sequences": ["\n\nHuman"],
+    }
+    
+    model = BedrockChat(client=bedrock_runtime, model_id=model_id, model_kwargs=model_kwargs)
+    return model
+
+# Textract-related functions
+def get_textract_results(document_path):
+    """
+    Extract text blocks using Textract
+    """
+    with open(document_path, 'rb') as document:
+        response = textract.analyze_document(
+            Document={'Bytes': document.read()},
+            FeatureTypes=["TABLES", "FORMS"]
+        )
+    return response
+
+def is_heading(block):
+    """
+    Determine if a block is a heading by checking its font size (inferred from bounding box)
+    and position relative to other blocks.
+    """
+    bbox = block['Geometry']['BoundingBox']
+    height = bbox['Height']
+    
+    # Heuristic: Larger height blocks could be headings (adjust the threshold based on your document structure)
+    return height > 0.05
+
+def group_blocks_by_section(blocks):
+    """
+    Group blocks into sections based on headings and proximity
+    """
+    sections = []
+    current_section = None
+
+    for block in blocks:
+        if block['BlockType'] == 'LINE':
+            # If block is determined to be a heading
+            if is_heading(block):
+                # If there's an ongoing section, save it and start a new one
+                if current_section:
+                    sections.append(current_section)
+                current_section = {'heading': block['Text'], 'content': []}
+            else:
+                # Add non-heading content to the current section
+                if current_section:
+                    current_section['content'].append(block['Text'])
+
+    # Append the last section
+    if current_section:
+        sections.append(current_section)
+
+    return sections
+
+# Function to rewrite the section using your original Claude 3 model
+def rewrite_section_with_claude(model, section):
+    """
+    Use Claude 3 to rewrite the content of each section while maintaining its meaning
+    """
+    content_to_rewrite = " ".join(section['content'])
+    prompt = f"Rewrite the following section while maintaining the original meaning:\n\n{content_to_rewrite}\n\nMake sure to keep the tone and structure similar."
+    
+    # Send prompt to the Claude model
+    response = model.chat({"prompt": prompt})
+    
+    # Extract the rewritten content from the model's response
+    rewritten_content = response.get('completion', '')
+    
+    return rewritten_content
+
+# Main function to process the document and rewrite the content
+def process_and_rewrite_document(document_path, top_k, top_p, temperature):
+    # Load the Claude 3 model with your parameters
+    model = load_model(top_k, top_p, temperature)
+
+    # Extract document sections with Textract
+    response = get_textract_results(document_path)
+    
+    # Collect all text blocks (lines)
+    blocks = response['Blocks']
+    
+    # Group blocks by sections
+    sections = group_blocks_by_section(blocks)
+    
+    # Rewrite each section using Claude 3 and print the rewritten content
+    for section in sections:
+        rewritten_content = rewrite_section_with_claude(model, section)
+        print(f"Section Heading: {section['heading']}")
+        print(f"Rewritten Content: {rewritten_content}")
+        print("\n" + "-" * 50 + "\n")
+
+if __name__ == "__main__":
+    document_path = "path_to_your_document.pdf"  # Replace with your document path
+    top_k = 50  # Example value
+    top_p = 0.9  # Example value
+    temperature = 0.7  # Example value
+    process_and_rewrite_document(document_path, top_k, top_p, temperature)
