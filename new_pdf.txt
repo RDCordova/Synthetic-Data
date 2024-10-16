@@ -1,5 +1,6 @@
 import boto3
 from botocore.config import Config
+from fpdf import FPDF
 
 # Keeping your original Claude 3 model definition
 def load_model(top_k, top_p, temperature):
@@ -68,13 +69,14 @@ def group_blocks_by_section(blocks):
 
     return sections
 
-# Function to rewrite the section using your original Claude 3 model
-def rewrite_section_with_claude(model, section):
+# Function to rewrite the section using your original Claude 3 model, with user instructions
+def rewrite_section_with_claude(model, section, user_instructions):
     """
-    Use Claude 3 to rewrite the content of each section while maintaining its meaning
+    Use Claude 3 to rewrite the content of each section while maintaining its meaning, with user instructions
     """
     content_to_rewrite = " ".join(section['content'])
-    prompt = f"Rewrite the following section while maintaining the original meaning:\n\n{content_to_rewrite}\n\nMake sure to keep the tone and structure similar."
+    prompt = f"Rewrite the following section while maintaining the original meaning:\n\n{content_to_rewrite}\n\n"
+    prompt += f"Please apply the following modifications: {user_instructions}"
     
     # Send prompt to the Claude model
     response = model.chat({"prompt": prompt})
@@ -84,8 +86,29 @@ def rewrite_section_with_claude(model, section):
     
     return rewritten_content
 
+# Function to create a new PDF with the rewritten content
+def create_pdf(sections, output_pdf_path):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+
+    # Add each section to the PDF
+    for section in sections:
+        pdf.set_font("Arial", 'B', 14)
+        pdf.cell(200, 10, txt=section['heading'], ln=True)
+        pdf.ln(10)  # Add a line break
+        
+        pdf.set_font("Arial", size=12)
+        for line in section['rewritten_content']:
+            pdf.multi_cell(0, 10, txt=line)
+        pdf.ln(10)  # Add a line break after each section
+    
+    # Save the new PDF
+    pdf.output(output_pdf_path)
+
 # Main function to process the document and rewrite the content
-def process_and_rewrite_document(document_path, top_k, top_p, temperature):
+def process_and_rewrite_document(document_path, top_k, top_p, temperature, user_instructions, output_pdf_path):
     # Load the Claude 3 model with your parameters
     model = load_model(top_k, top_p, temperature)
 
@@ -98,16 +121,24 @@ def process_and_rewrite_document(document_path, top_k, top_p, temperature):
     # Group blocks by sections
     sections = group_blocks_by_section(blocks)
     
-    # Rewrite each section using Claude 3 and print the rewritten content
+    # Rewrite each section using Claude 3
     for section in sections:
-        rewritten_content = rewrite_section_with_claude(model, section)
-        print(f"Section Heading: {section['heading']}")
-        print(f"Rewritten Content: {rewritten_content}")
-        print("\n" + "-" * 50 + "\n")
+        rewritten_content = rewrite_section_with_claude(model, section, user_instructions)
+        section['rewritten_content'] = rewritten_content.split('\n')  # Split into lines for better PDF formatting
+    
+    # Create a new PDF with the rewritten content
+    create_pdf(sections, output_pdf_path)
 
 if __name__ == "__main__":
     document_path = "path_to_your_document.pdf"  # Replace with your document path
     top_k = 50  # Example value
     top_p = 0.9  # Example value
     temperature = 0.7  # Example value
-    process_and_rewrite_document(document_path, top_k, top_p, temperature)
+    
+    # User input on the modification they want to apply
+    user_instructions = "Change all addresses to a generic address."
+    
+    # Path for the output PDF
+    output_pdf_path = "path_to_new_document.pdf"
+    
+    process_and_rewrite_document(document_path, top_k, top_p, temperature, user_instructions, output_pdf_path)
