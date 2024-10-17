@@ -38,16 +38,26 @@
         # Wrap the text within the bounding box width
         wrapped_lines = wrap_text(text, bbox_width, font_size)
 
-        # Draw each wrapped line of text within the bounding box
+        # Calculate initial y-position for the text within the bounding box
         current_y = y
+        line_height = font_size + 4  # Add some extra spacing between lines to prevent overlap
+
+        # Draw each wrapped line of text within the bounding box
         for wrapped_line in wrapped_lines:
-            if current_y - font_size < margin:  # If y-position goes below margin, start a new page
+            if current_y - line_height < margin:  # If y-position goes below margin, start a new page
                 c.showPage()
                 current_y = height - margin
 
             c.setFont("Helvetica", font_size)
             c.drawString(x, current_y, wrapped_line)
-            current_y -= font_size + 2  # Move down for the next line with some padding
+            current_y -= line_height  # Move down for the next line with adjusted spacing
+
+        # Ensure the next block starts below the current block's bounding box height
+        if current_y - bbox_height < margin:
+            c.showPage()
+            current_y = height - margin
+        else:
+            current_y -= bbox_height
 
     # Handle tables (if any) similarly, but this code focuses on text blocks
     # Add logic to handle tables if needed
