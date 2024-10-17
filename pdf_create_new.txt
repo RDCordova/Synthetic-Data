@@ -1,0 +1,55 @@
+    c = canvas.Canvas(output_file, pagesize=letter)
+    width, height = letter
+    margin = 50  # Define margins for content
+
+    # Function to wrap text within the available width based on the bounding box
+    def wrap_text(text, bbox_width, font_size):
+        c.setFont("Helvetica", font_size)
+        wrapped_lines = []
+        words = text.split(' ')
+        line = ""
+
+        for word in words:
+            test_line = line + word + " "
+            # Check if the current line fits within the available width
+            if c.stringWidth(test_line, "Helvetica", font_size) <= bbox_width:
+                line = test_line
+            else:
+                wrapped_lines.append(line)
+                line = word + " "
+
+        if line:
+            wrapped_lines.append(line)
+
+        return wrapped_lines
+
+    # Process each block of text
+    for block in mapped_text_blocks:
+        text = block['text']
+        bbox = block['bbox']  # Bounding box coordinates for this block of text
+        font_size = 10  # Font size can be adjusted based on requirements
+
+        # Scale bbox coordinates to match PDF dimensions
+        x = bbox['Left'] * width
+        y = height - (bbox['Top'] * height)
+        bbox_width = bbox['Width'] * width
+        bbox_height = bbox['Height'] * height
+
+        # Wrap the text within the bounding box width
+        wrapped_lines = wrap_text(text, bbox_width, font_size)
+
+        # Draw each wrapped line of text within the bounding box
+        current_y = y
+        for wrapped_line in wrapped_lines:
+            if current_y - font_size < margin:  # If y-position goes below margin, start a new page
+                c.showPage()
+                current_y = height - margin
+
+            c.setFont("Helvetica", font_size)
+            c.drawString(x, current_y, wrapped_line)
+            current_y -= font_size + 2  # Move down for the next line with some padding
+
+    # Handle tables (if any) similarly, but this code focuses on text blocks
+    # Add logic to handle tables if needed
+
+    c.save()
