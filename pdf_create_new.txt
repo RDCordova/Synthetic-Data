@@ -38,26 +38,46 @@
         # Wrap the text within the bounding box width
         wrapped_lines = wrap_text(text, bbox_width, font_size)
 
-        # Calculate initial y-position for the text within the bounding box
-        current_y = y
-        line_height = font_size + 4  # Add some extra spacing between lines to prevent overlap
+        # Calculate total height needed for all wrapped lines
+        line_height = font_size + 4  # Extra spacing between lines to prevent overlap
+        total_text_height = len(wrapped_lines) * line_height
 
-        # Draw each wrapped line of text within the bounding box
-        for wrapped_line in wrapped_lines:
-            if current_y - line_height < margin:  # If y-position goes below margin, start a new page
-                c.showPage()
-                current_y = height - margin
+        # Handle the case where the wrapped text exceeds the bounding box height
+        if total_text_height > bbox_height:
+            remaining_text = wrapped_lines[:]  # Copy all wrapped lines
+            while remaining_text:
+                # Check if the current block of text fits on the page
+                if total_text_height > (y - margin):
+                    # Draw as much text as fits on the page
+                    lines_that_fit = int((y - margin) / line_height)
+                    lines_to_draw = remaining_text[:lines_that_fit]
 
-            c.setFont("Helvetica", font_size)
-            c.drawString(x, current_y, wrapped_line)
-            current_y -= line_height  # Move down for the next line with adjusted spacing
+                    for line in lines_to_draw:
+                        c.drawString(x, y, line)
+                        y -= line_height
 
-        # Ensure the next block starts below the current block's bounding box height
-        if current_y - bbox_height < margin:
-            c.showPage()
-            current_y = height - margin
+                    # Move to a new page and continue
+                    c.showPage()
+                    y = height - margin
+                    remaining_text = remaining_text[lines_that_fit:]
+                    total_text_height = len(remaining_text) * line_height
+                else:
+                    # Draw remaining text that fits within the remaining bbox height
+                    for line in remaining_text:
+                        c.drawString(x, y, line)
+                        y -= line_height
+                    remaining_text = []
         else:
-            current_y -= bbox_height
+            # Draw wrapped text within the bounding box
+            current_y = y
+            for wrapped_line in wrapped_lines:
+                if current_y - line_height < margin:  # If y-position goes below margin, start a new page
+                    c.showPage()
+                    current_y = height - margin
+
+                c.setFont("Helvetica", font_size)
+                c.drawString(x, current_y, wrapped_line)
+                current_y -= line_height  # Move down for the next line
 
     # Handle tables (if any) similarly, but this code focuses on text blocks
     # Add logic to handle tables if needed
