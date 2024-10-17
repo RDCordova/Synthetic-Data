@@ -1,0 +1,58 @@
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+
+# Function to lay out content as plain text, without bounding box restrictions
+def create_plain_text_pdf(mapped_text_blocks, output_file):
+    c = canvas.Canvas(output_file, pagesize=letter)
+    width, height = letter
+    margin = 50  # Define page margins
+    current_y = height - margin  # Start at the top of the page
+    
+    # Set a standard font size and spacing
+    font_size = 10
+    line_height = font_size + 4  # Spacing between lines
+
+    # Iterate over each block of text
+    for block in mapped_text_blocks:
+        text = block['text']  # Extract the text content from the block
+        words = text.split(' ')  # Split text into words for wrapping
+        line = ''  # Current line of text
+        
+        # Wrap text within the page width
+        for word in words:
+            test_line = line + word + ' '
+            if c.stringWidth(test_line, "Helvetica", font_size) <= (width - 2 * margin):
+                line = test_line  # Add word to the current line if it fits
+            else:
+                # Draw the current line
+                c.drawString(margin, current_y, line)
+                current_y -= line_height  # Move down for the next line
+
+                # Start a new page if there's no space left
+                if current_y < margin:
+                    c.showPage()
+                    current_y = height - margin
+
+                line = word + ' '  # Start a new line with the current word
+
+        # Draw the last line in the block
+        if line:
+            c.drawString(margin, current_y, line)
+            current_y -= line_height
+
+            # Start a new page if there's no space left
+            if current_y < margin:
+                c.showPage()
+                current_y = height - margin
+
+    c.save()  # Save the final PDF
+
+# Sample usage with simplified content
+mapped_text_blocks = [
+    {'text': 'This is a sample text. It will be laid out on the page without worrying about its original position.'},
+    {'text': 'The goal is to make sure that the content flows continuously across the pages without overlaps.'},
+    {'text': 'Each block of text is handled separately, and page breaks are added automatically as needed.'}
+]
+
+# Generate the PDF
+create_plain_text_pdf(mapped_text_blocks, 'output_plain_text.pdf')
