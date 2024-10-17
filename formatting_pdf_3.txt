@@ -1,0 +1,93 @@
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+
+# Function to lay out content with bounding boxes and paragraph grouping
+def create_pdf_with_grouped_paragraphs(mapped_text_blocks, output_file):
+    c = canvas.Canvas(output_file, pagesize=letter)
+    width, height = letter
+    margin = 50  # Define page margins
+    current_y = height - margin  # Start at the top of the page
+
+    # Set standard font sizes and line spacing
+    body_font_size = 10
+    header_font_size = 14
+    line_height = body_font_size + 4  # Spacing between lines
+
+    # Function to wrap text within a bounding box width
+    def wrap_text(text, bbox_width, font_size):
+        c.setFont("Helvetica", font_size)
+        words = text.split(' ')
+        lines = []
+        line = ''
+        for word in words:
+            test_line = line + word + ' '
+            if c.stringWidth(test_line, "Helvetica", font_size) <= bbox_width:
+                line = test_line  # Add word to the current line if it fits
+            else:
+                lines.append(line)  # Line is full, start a new line
+                line = word + ' '
+        if line:
+            lines.append(line)  # Add the remaining line
+        return lines
+
+    # Track the previous bounding box to group blocks as paragraphs
+    prev_bbox = None
+
+    # Iterate over each block of text
+    for i, block in enumerate(mapped_text_blocks):
+        text = block['text']
+        bbox = block['bbox']
+        
+        # Get bounding box positions relative to the page
+        x = bbox['Left'] * width
+        y = height - (bbox['Top'] * height)
+        bbox_width = bbox['Width'] * width  # Width of the bounding box
+        bbox_height = bbox['Height'] * height  # Height of the bounding box
+
+        # Check if the current block should be grouped as part of a paragraph
+        if prev_bbox and prev_bbox['Top'] - bbox['Top'] < 0.05:  # Small vertical distance, group together
+            current_y -= 5  # Small gap between lines in the same paragraph
+        else:
+            # New section or paragraph, adjust current_y to the new block's position
+            current_y = y
+
+            # Add extra space between paragraphs/sections
+            if i != 0:  # Skip the first block (usually a header)
+                current_y -= 10
+
+        # Formatting: Apply larger font size for the first block (header)
+        if i == 0:
+            c.setFont("Helvetica-Bold", header_font_size)  # Header style
+            c.drawString(x, current_y, text)  # Draw the header text at bbox position
+            current_y = y - header_font_size - 10  # Adjust y-position after header
+        else:
+            # Regular body text
+            wrapped_lines = wrap_text(text, bbox_width, body_font_size)
+            
+            # Draw each wrapped line within the bounding box
+            for line in wrapped_lines:
+                # Ensure the current line fits within the bounding box
+                if current_y - line_height < margin or current_y - bbox_height < margin:
+                    c.showPage()
+                    current_y = height - margin
+                    c.setFont("Helvetica", body_font_size)
+
+                c.drawString(x, current_y, line)
+                current_y -= line_height
+
+        # Store the current bounding box as the previous one for the next iteration
+        prev_bbox = bbox
+
+    # Save the final PDF
+    c.save()
+
+# Example usage with bounding box information and paragraphs grouped
+mapped_text_blocks = [
+    {'text': 'Bounding Box Example PDF', 'bbox': {'Left': 0.1, 'Top': 0.9, 'Width': 0.8, 'Height': 0.05}},  # Header
+    {'text': 'This is the first block of text, and it should be grouped into a paragraph with the following text block. The paragraph should flow across bounding boxes.', 'bbox': {'Left': 0.1, 'Top': 0.85, 'Width': 0.8, 'Height': 0.05}},
+    {'text': 'This is the second part of the paragraph, continuing where the first block left off. It should not be separated by excessive space.', 'bbox': {'Left': 0.1, 'Top': 0.8, 'Width': 0.8, 'Height': 0.05}},
+    {'text': 'This is the start of a new paragraph. It should have more space above it to indicate the separation between the two paragraphs.', 'bbox': {'Left': 0.1, 'Top': 0.7, 'Width': 0.8, 'Height': 0.05}},
+]
+
+# Generate the PDF with grouped paragraphs
+create_pdf_with_grouped_paragraphs(mapped_text_blocks, 'output_grouped_paragraphs.pdf')
