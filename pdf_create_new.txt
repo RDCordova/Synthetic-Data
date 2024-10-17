@@ -1,3 +1,8 @@
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+
+# Function to handle wrapping text, respecting the original PDF formatting and adding page breaks if needed
+def create_pdf_with_mapped_content_and_wrapping(mapped_text_blocks, tables, output_file):
     c = canvas.Canvas(output_file, pagesize=letter)
     width, height = letter
     margin = 50  # Define margins for content
@@ -42,44 +47,18 @@
         line_height = font_size + 4  # Extra spacing between lines to prevent overlap
         total_text_height = len(wrapped_lines) * line_height
 
-        # Handle the case where the wrapped text exceeds the bounding box height
-        if total_text_height > bbox_height:
-            remaining_text = wrapped_lines[:]  # Copy all wrapped lines
-            while remaining_text:
-                # Check if the current block of text fits on the page
-                if total_text_height > (y - margin):
-                    # Draw as much text as fits on the page
-                    lines_that_fit = int((y - margin) / line_height)
-                    lines_to_draw = remaining_text[:lines_that_fit]
+        # Ensure text does not overflow the bounding box or page, moving to the next page when necessary
+        current_y = y
+        for wrapped_line in wrapped_lines:
+            # Check if there's space within the bounding box, else move to a new page
+            if (current_y - line_height < margin) or (current_y - total_text_height < margin):
+                c.showPage()  # Move to a new page
+                current_y = height - margin
 
-                    for line in lines_to_draw:
-                        c.drawString(x, y, line)
-                        y -= line_height
+            # Draw the text within the bounding box
+            c.setFont("Helvetica", font_size)
+            c.drawString(x, current_y, wrapped_line)
+            current_y -= line_height  # Move down for the next line
 
-                    # Move to a new page and continue
-                    c.showPage()
-                    y = height - margin
-                    remaining_text = remaining_text[lines_that_fit:]
-                    total_text_height = len(remaining_text) * line_height
-                else:
-                    # Draw remaining text that fits within the remaining bbox height
-                    for line in remaining_text:
-                        c.drawString(x, y, line)
-                        y -= line_height
-                    remaining_text = []
-        else:
-            # Draw wrapped text within the bounding box
-            current_y = y
-            for wrapped_line in wrapped_lines:
-                if current_y - line_height < margin:  # If y-position goes below margin, start a new page
-                    c.showPage()
-                    current_y = height - margin
-
-                c.setFont("Helvetica", font_size)
-                c.drawString(x, current_y, wrapped_line)
-                current_y -= line_height  # Move down for the next line
-
-    # Handle tables (if any) similarly, but this code focuses on text blocks
-    # Add logic to handle tables if needed
-
+    # Save the PDF after processing all text blocks
     c.save()
