@@ -28,6 +28,9 @@ def create_pdf_with_mapped_content_and_wrapping(mapped_text_blocks, tables, outp
 
         return wrapped_lines
 
+    # Initialize current_y properly
+    current_y = height - margin
+
     # Process each block of text
     for block in mapped_text_blocks:
         text = block['text']
@@ -47,13 +50,15 @@ def create_pdf_with_mapped_content_and_wrapping(mapped_text_blocks, tables, outp
         line_height = font_size + 4  # Extra spacing between lines to prevent overlap
         total_text_height = len(wrapped_lines) * line_height
 
+        # Update current_y based on the bounding box's y-position
+        current_y = y
+
         # Check if the current block fits within the remaining space on the page
         if current_y - total_text_height < margin:
             c.showPage()  # Move to a new page
             current_y = height - margin
 
         # Draw the text within the bounding box
-        current_y = y
         for wrapped_line in wrapped_lines:
             # Ensure there's enough space on the page for the current line
             if current_y - line_height < margin:  # If not enough space, go to the next page
@@ -71,4 +76,5 @@ def create_pdf_with_mapped_content_and_wrapping(mapped_text_blocks, tables, outp
 
     c.save()
 
-%3
+
+%4
