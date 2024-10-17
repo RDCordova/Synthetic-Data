@@ -1,16 +1,20 @@
+
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-# Function to lay out content as plain text, without bounding box restrictions
-def create_plain_text_pdf(mapped_text_blocks, output_file):
+# Function to lay out content as plain text, with proper text wrapping
+def create_wrapped_text_pdf(mapped_text_blocks, output_file):
     c = canvas.Canvas(output_file, pagesize=letter)
     width, height = letter
     margin = 50  # Define page margins
     current_y = height - margin  # Start at the top of the page
     
-    # Set a standard font size and spacing
+    # Set a standard font size and line spacing
     font_size = 10
     line_height = font_size + 4  # Spacing between lines
+    
+    # Set the font
+    c.setFont("Helvetica", font_size)
 
     # Iterate over each block of text
     for block in mapped_text_blocks:
@@ -47,7 +51,7 @@ def create_plain_text_pdf(mapped_text_blocks, output_file):
 
     c.save()  # Save the final PDF
 
-# Sample usage with simplified content
+# Example usage with simplified content
 mapped_text_blocks = [
     {'text': 'This is a sample text. It will be laid out on the page without worrying about its original position.'},
     {'text': 'The goal is to make sure that the content flows continuously across the pages without overlaps.'},
@@ -55,4 +59,4 @@ mapped_text_blocks = [
 ]
 
 # Generate the PDF
-create_plain_text_pdf(mapped_text_blocks, 'output_plain_text.pdf')
+create_wrapped_text_pdf(mapped_text_blocks, 'output_wrapped_text.pdf')
