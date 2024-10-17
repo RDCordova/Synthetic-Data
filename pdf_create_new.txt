@@ -1,7 +1,8 @@
+
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-# Function to handle wrapping text, respecting the original PDF formatting and adding page breaks if needed
+# Function to handle wrapping text and respecting the original PDF formatting
 def create_pdf_with_mapped_content_and_wrapping(mapped_text_blocks, tables, output_file):
     c = canvas.Canvas(output_file, pagesize=letter)
     width, height = letter
@@ -47,18 +48,27 @@ def create_pdf_with_mapped_content_and_wrapping(mapped_text_blocks, tables, outp
         line_height = font_size + 4  # Extra spacing between lines to prevent overlap
         total_text_height = len(wrapped_lines) * line_height
 
-        # Ensure text does not overflow the bounding box or page, moving to the next page when necessary
+        # Handle the case where the wrapped text exceeds the available page height
         current_y = y
         for wrapped_line in wrapped_lines:
-            # Check if there's space within the bounding box, else move to a new page
-            if (current_y - line_height < margin) or (current_y - total_text_height < margin):
-                c.showPage()  # Move to a new page
+            # Check if the current line fits within the remaining page height
+            if current_y - line_height < margin:  # No space left, go to next page
+                c.showPage()
                 current_y = height - margin
 
-            # Draw the text within the bounding box
+            # Draw the text
             c.setFont("Helvetica", font_size)
             c.drawString(x, current_y, wrapped_line)
-            current_y -= line_height  # Move down for the next line
+            current_y -= line_height
 
-    # Save the PDF after processing all text blocks
+        # Ensure no overlapping by handling remaining text properly
+        remaining_space_in_bbox = current_y - (height - bbox_height)
+        if remaining_space_in_bbox < line_height:
+            c.showPage()
+            current_y = height - margin
+
     c.save()
+
+
+
+#F
