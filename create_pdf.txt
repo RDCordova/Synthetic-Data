@@ -1,0 +1,51 @@
+def create_pdf_with_wrapped_text(mapped_text_blocks, tables, output_file):
+    c = canvas.Canvas(output_file, pagesize=letter)
+    width, height = letter
+    margin = 50  # Define margins
+    text_width = width - 2 * margin  # Available width for text
+    current_y = height - margin  # Starting y-position
+
+    # Function to wrap text within the available width
+    def wrap_text(text, font_size):
+        c.setFont("Helvetica", font_size)
+        wrapped_lines = []
+        words = text.split(' ')
+        line = ""
+        
+        for word in words:
+            test_line = line + word + " "
+            # Check the width of the test line
+            if c.stringWidth(test_line, "Helvetica", font_size) <= text_width:
+                line = test_line
+            else:
+                wrapped_lines.append(line)
+                line = word + " "
+        
+        if line:
+            wrapped_lines.append(line)
+        
+        return wrapped_lines
+
+    # Process each block of text
+    for block in mapped_text_blocks:
+        text = block['text']
+        bbox = block['bbox']
+        font_size = 10  # You can adjust font size as needed
+        
+        # Wrap the text for each block
+        wrapped_lines = wrap_text(text, font_size)
+        
+        # Calculate y-position and handle page breaks if necessary
+        for wrapped_line in wrapped_lines:
+            if current_y < margin:  # If the y-position is below margin, start a new page
+                c.showPage()
+                current_y = height - margin
+            
+            c.setFont("Helvetica", font_size)
+            c.drawString(margin, current_y, wrapped_line)
+            current_y -= font_size + 5  # Move to the next line with some padding
+
+    # Handle tables similarly (if needed)
+    # You can use the same wrapping logic to handle tables if table data overflows
+
+    c.save()
