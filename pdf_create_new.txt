@@ -1,4 +1,3 @@
-
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
@@ -48,27 +47,28 @@ def create_pdf_with_mapped_content_and_wrapping(mapped_text_blocks, tables, outp
         line_height = font_size + 4  # Extra spacing between lines to prevent overlap
         total_text_height = len(wrapped_lines) * line_height
 
-        # Handle the case where the wrapped text exceeds the available page height
+        # Check if the current block fits within the remaining space on the page
+        if current_y - total_text_height < margin:
+            c.showPage()  # Move to a new page
+            current_y = height - margin
+
+        # Draw the text within the bounding box
         current_y = y
         for wrapped_line in wrapped_lines:
-            # Check if the current line fits within the remaining page height
-            if current_y - line_height < margin:  # No space left, go to next page
+            # Ensure there's enough space on the page for the current line
+            if current_y - line_height < margin:  # If not enough space, go to the next page
                 c.showPage()
                 current_y = height - margin
 
-            # Draw the text
             c.setFont("Helvetica", font_size)
             c.drawString(x, current_y, wrapped_line)
             current_y -= line_height
 
-        # Ensure no overlapping by handling remaining text properly
-        remaining_space_in_bbox = current_y - (height - bbox_height)
-        if remaining_space_in_bbox < line_height:
+        # Move to the next block (start from a new position or page)
+        if current_y - bbox_height < margin:
             c.showPage()
             current_y = height - margin
 
     c.save()
 
-
-
-#F
+%3
