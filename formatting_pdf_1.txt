@@ -1,0 +1,70 @@
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+
+# Function to lay out content with some basic formatting
+def create_formatted_pdf(mapped_text_blocks, output_file):
+    c = canvas.Canvas(output_file, pagesize=letter)
+    width, height = letter
+    margin = 50  # Define page margins
+    current_y = height - margin  # Start at the top of the page
+    
+    # Set a standard font size and spacing
+    body_font_size = 10
+    header_font_size = 14
+    line_height = body_font_size + 4  # Spacing between lines
+
+    # Iterate over each block of text
+    for i, block in enumerate(mapped_text_blocks):
+        text = block['text']  # Extract the text content from the block
+        
+        # Formatting: Apply larger font size for the first block (header)
+        if i == 0:
+            c.setFont("Helvetica-Bold", header_font_size)  # Use bold font for the header
+            c.drawString(margin, current_y, text)  # Draw the header text
+            current_y -= header_font_size + 10  # Add more space after the header
+        else:
+            # Regular body text
+            c.setFont("Helvetica", body_font_size)
+            words = text.split(' ')  # Split text into words for wrapping
+            line = ''  # Current line of text
+            
+            # Wrap text within the page width
+            for word in words:
+                test_line = line + word + ' '
+                if c.stringWidth(test_line, "Helvetica", body_font_size) <= (width - 2 * margin):
+                    line = test_line  # Add word to the current line if it fits
+                else:
+                    # Draw the current line
+                    c.drawString(margin, current_y, line)
+                    current_y -= line_height  # Move down for the next line
+
+                    # Start a new page if there's no space left
+                    if current_y < margin:
+                        c.showPage()
+                        current_y = height - margin
+                        c.setFont("Helvetica", body_font_size)  # Reset font after page break
+
+                    line = word + ' '  # Start a new line with the current word
+
+            # Draw the last line in the block
+            if line:
+                c.drawString(margin, current_y, line)
+                current_y -= line_height
+
+                # Start a new page if there's no space left
+                if current_y < margin:
+                    c.showPage()
+                    current_y = height - margin
+                    c.setFont("Helvetica", body_font_size)
+
+        # Add extra space between paragraphs
+        current_y -= 10
+
+    # Save the final PDF
+    c.save()
+
+# Example usage with simplified content and formatting
+mapped_text_blocks = [
+    {'text': 'Formatted PDF Example'},  # Header (bold, larger font)
+    {'text': 'This is the first paragraph of the document. It demonstrates how the text will be laid out with basic formatting. We are using regular font here, and it will wrap properly within the page.'},
+    {'text': 'Here
