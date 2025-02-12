@@ -1,0 +1,138 @@
+import logging
+import warnings
+from pyspark.sql import SparkSession
+from pyspark.ml.feature import StringIndexer, VectorAssembler, StandardScaler
+from pyspark.ml.clustering import KMeans
+from pyspark.ml.evaluation import ClusteringEvaluator
+import matplotlib.pyplot as plt
+import time
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
+
+# Initialize Spark Session
+spark = SparkSession.builder \
+    .appName("KMeans_Clustering") \
+    .config("spark.ui.showConsoleProgress", "false") \
+    .getOrCreate()
+
+spark.sparkContext.setLogLevel("ERROR")  # Hide warnings
+
+# Initialize logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def log_step(step_description):
+    """Logs and prints the progress."""
+    logging.info(step_description)
+    print(f"✔ {step_description}")
+
+# Start time tracking
+start_time = time.time()
+
+# 🚀 Step 1: Load Raw Data
+log_step("Loading raw data from Parquet...")
+df_spark = spark.read.parquet("your_raw_data.parquet")
+
+# Display schema
+df_spark.printSchema()
+
+# 🚀 Step 2: Identify Categorical and Numerical Columns
+categorical_cols = [col for col, dtype in df_spark.dtypes if dtype == 'string']
+numerical_cols = [col for col, dtype in df_spark.dtypes if dtype in ('int', 'double', 'float')]
+
+log_step(f"Identified Categorical Columns: {categorical_cols}")
+log_step(f"Identified Numerical Columns: {numerical_cols}")
+
+# 🚀 Step 3: Encode Categorical Features
+if categorical_cols:
+    log_step("Encoding categorical features using StringIndexer...")
+    for col in categorical_cols:
+        indexer = StringIndexer(inputCol=col, outputCol=col+"_index").fit(df_spark)
+        df_spark = indexer.transform(df_spark)
+    categorical_cols = [col+"_index" for col in categorical_cols]  # Update list with new indexed columns
+
+# 🚀 Step 4: Scale Numerical Features
+log_step("Scaling numerical features using StandardScaler...")
+feature_columns = numerical_cols + categorical_cols
+
+# Ensure all features are numeric before assembly
+df_spark = df_spark.dropna(subset=feature_columns)
+
+# Assemble Features
+assembler = VectorAssembler(inputCols=feature_columns, outputCol="features_unscaled")
+df_spark = assembler.transform(df_spark)
+
+# Scale the features
+scaler = StandardScaler(inputCol="features_unscaled", outputCol="features", withStd=True, withMean=True)
+df_spark = scaler.fit(df_spark).transform(df_spark)
+
+# 🚀 Step 5: Verify Features Column
+df_spark.printSchema()
+df_spark.select("features").show(5, truncate=False)
+
+# 🚀 Step 6: Determine Optimal k (Elbow & Silhouette)
+log_step("Determining the optimal number of clusters (k)...")
+
+costs = []
+silhouette_scores = []
+K_range = range(2, 10)
+best_k = 2
+best_score = -1
+
+for k in K_range:
+    log_step(f"Training K-Means for k={k}...")
+    
+    kmeans = KMeans(featuresCol="features", k=k, seed=42)
+    model = kmeans.fit(df_spark)
+
+    # Elbow Method (Inertia)
+    inertia = model.summary.trainingCost
+    costs.append(inertia)
+
+    # Silhouette Score
+    predictions = model.transform(df_spark)
+    evaluator = ClusteringEvaluator(featuresCol="features", metricName="silhouette")
+    silhouette_score = evaluator.evaluate(predictions)
+    silhouette_scores.append(silhouette_score)
+
+    log_step(f"  → Inertia: {inertia:.2f}, Silhouette Score: {silhouette_score:.4f}")
+
+    if silhouette_score > best_score:
+        best_score = silhouette_score
+        best_k = k
+
+log_step(f"Optimal k based on Silhouette Score: {best_k}")
+
+# 🚀 Step 7: Plot Elbow Method
+log_step("Plotting the Elbow Method curve...")
+plt.figure(figsize=(8, 5))
+plt.plot(K_range, costs, marker='o', linestyle='--')
+plt.xlabel('Number of Clusters (k)')
+plt.ylabel('Inertia (Cost)')
+plt.title('Elbow Method for Optimal k')
+plt.show()
+
+# 🚀 Step 8: Train Final K-Means Model
+log_step(f"Training final K-Means model with k={best_k}...")
+kmeans = KMeans(featuresCol="features", k=best_k, seed=42)
+model = kmeans.fit(df_spark)
+
+# 🚀 Step 9: Assign Clusters
+log_step("Assigning clusters to dataset...")
+df_spark = model.transform(df_spark)
+
+# 🚀 Step 10: Save Clustered Data
+log_step("Saving clustered data to Parquet...")
+df_spark.write.mode("overwrite").parquet("clustered_data.parquet")
+
+# 🚀 Step 11: Display Results
+log_step("Fetching clustered data for visualization...")
+df_pandas = df_spark.select("Cluster").toPandas()
+
+import ace_tools as tools
+tools.display_dataframe_to_user(name="Clustered Data", dataframe=df_pandas)
+
+# 🚀 Final Step: Process Complete!
+end_time = time.time()
+log_step(f"Clustering process completed in {round(end_time - start_time, 2)} seconds! 🎉")
+
