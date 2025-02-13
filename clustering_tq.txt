@@ -1,0 +1,66 @@
+import logging
+import warnings
+import time
+from pyspark.sql import SparkSession
+from pyspark.ml.clustering import KMeans
+from tqdm import tqdm
+import threading
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
+
+# Initialize Spark Session
+spark = SparkSession.builder \
+    .appName("KMeans_Clustering") \
+    .config("spark.ui.showConsoleProgress", "false") \
+    .config("spark.driver.memory", "40g") \
+    .config("spark.executor.memory", "16g") \
+    .getOrCreate()
+
+spark.sparkContext.setLogLevel("ERROR")  # Hide warnings
+
+# 🚀 Sample Data (Test on 10% of data)
+df_sample = df_spark.sample(fraction=0.1, seed=42)  # Use only 10% of data
+
+# 🚀 Define tqdm-enabled fit function
+def tqdm_fit(model, df, desc="Fitting KMeans on Sample"):
+    progress_bar = tqdm(total=100, desc=desc, position=0, leave=True)
+
+    def fit_and_update():
+        """Runs KMeans.fit() and updates tqdm"""
+        start_time = time.time()
+        est_time = 30  # Estimated duration (modify based on dataset size)
+
+        # Run `.fit()` on a separate thread to keep tqdm live
+        global fitted_model
+        fitted_model = model.fit(df)
+
+        # Ensure progress reaches 100%
+        progress_bar.n = 100
+        progress_bar.update(0)  # Force display update
+        progress_bar.close()
+    
+    # Start fit() in a background thread
+    thread = threading.Thread(target=fit_and_update)
+    thread.start()
+
+    # Simulate tqdm update until fit() completes
+    while thread.is_alive():
+        elapsed_time = time.time() - start_time
+        progress = min(int((elapsed_time / est_time) * 100), 99)
+        progress_bar.n = progress
+        progress_bar.update(0)  # Force update
+        time.sleep(1)  # Adjust sleep interval if needed
+
+    thread.join()  # Ensure fit() completes
+
+    return fitted_model
+
+# 🚀 Run K-Means with tqdm Progress Bar
+log_step("Running K-Means on a Sample (10% of data)...")
+kmeans = KMeans(featuresCol="features", k=4, seed=42)
+
+# Fit K-Means with a tqdm progress bar
+model = tqdm_fit(kmeans, df_sample, desc="Fitting KMeans on Sample")
+
+log_step("K-Means training on sample completed! 🎉")
