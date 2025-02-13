@@ -1,0 +1,106 @@
+import time
+import logging
+import warnings
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from pyspark.ml.clustering import KMeans
+from pyspark.ml.evaluation import ClusteringEvaluator
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
+
+# Enable Spark logs for tracking
+spark.sparkContext.setLogLevel("INFO")
+
+# 🚀 Step 1: Define K Selection Parameters
+K_range = range(2, 10)  # Try k from 2 to 10
+costs = []  # Elbow method (Inertia)
+silhouette_scores = []  # Silhouette Score
+best_k = 2  # Track best k
+best_score = -1  # Track best silhouette score
+
+# Estimated time per KMeans fit (adjusted from sample testing)
+est_time_per_fit = 600  # Assume ~10 min per KMeans fit for 17M rows
+total_est_time = len(K_range) * est_time_per_fit
+
+print(f"🕒 Estimated total run time: ~{total_est_time // 60} minutes")
+
+# 🚀 Step 2: Run K-Means for Multiple k Values with Progress Bar
+with tqdm(total=len(K_range), desc="Running KMeans for k Selection") as pbar:
+    for k in K_range:
+        start_time = time.time()
+
+        print(f"\n✔ Training K-Means for k={k}...")
+
+        # Initialize KMeans model
+        kmeans = KMeans(featuresCol="features", k=k, seed=42, initMode="k-means||")
+
+        # Track Progress Bar While Fitting
+        def tqdm_fit(model, df, est_time=est_time_per_fit):
+            """Runs KMeans.fit() with tqdm progress bar tracking."""
+            progress_bar = tqdm(total=100, desc=f"Fitting KMeans (k={k})", position=0, leave=False)
+
+            def fit_and_update():
+                """Runs actual KMeans.fit() and ensures tqdm reaches 100%."""
+                global fitted_model
+                fitted_model = model.fit(df)  # Run K-Means fit
+
+                # Ensure progress reaches 100%
+                progress_bar.n = 100
+                progress_bar.update(0)
+                progress_bar.close()
+
+            import threading
+            thread = threading.Thread(target=fit_and_update)
+            thread.start()
+
+            while thread.is_alive():
+                elapsed_time = time.time() - start_time
+                progress = min(int((elapsed_time / est_time) * 100), 99)
+                progress_bar.n = progress
+                progress_bar.update(0)
+                time.sleep(1)
+
+            thread.join()
+            return fitted_model
+
+        # Run KMeans with Tracking
+        model = tqdm_fit(kmeans, df_spark, est_time=est_time_per_fit)
+
+        # Compute Inertia (Elbow Method)
+        inertia = model.summary.trainingCost
+        costs.append(inertia)
+
+        # Compute Silhouette Score
+        predictions = model.transform(df_spark)
+        evaluator = ClusteringEvaluator(featuresCol="features", metricName="silhouette")
+        silhouette_score = evaluator.evaluate(predictions)
+        silhouette_scores.append(silhouette_score)
+
+        # Track best k
+        if silhouette_score > best_score:
+            best_score = silhouette_score
+            best_k = k
+
+        # Show update & estimated time left
+        elapsed_time = time.time() - start_time
+        print(f"✔ k={k}: Inertia = {inertia:.2f}, Silhouette Score = {silhouette_score:.4f} (Time Taken: {elapsed_time // 60} min)")
+
+        pbar.update(1)  # Update tqdm progress
+
+print(f"\n🎯 Best k based on Silhouette Score: {best_k} (Score: {best_score:.4f})")
+
+# 🚀 Step 3: Plot Elbow Method & Silhouette Score
+fig, ax1 = plt.subplots(figsize=(10, 5))
+
+# Plot Inertia (Elbow Method)
+ax1.plot(K_range, costs, marker='o', linestyle='--', color='b', label="Elbow (Inertia)")
+ax1.set_xlabel("Number of Clusters (k)")
+ax1.set_ylabel("Inertia (Cost)", color='b')
+ax1.tick_params(axis='y', labelcolor='b')
+
+# Create second y-axis for Silhouette Score
+ax2 = ax1.twinx()
+ax2.plot(K_range, silhouette_scores, marker='s', linestyle='-', color='r', label="Silhouette Score")
+ax2.set_
+
