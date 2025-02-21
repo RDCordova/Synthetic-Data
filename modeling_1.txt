@@ -1,0 +1,118 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, collect_list, size
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, RepeatVector, TimeDistributed
+import pandas as pd
+import boto3
+
+# Initialize Spark session for ml.g4dn.8xlarge
+spark = SparkSession.builder \
+    .appName("Loan Time-Series Anomaly Detection POC") \
+    .config("spark.driver.memory", "128g") \
+    .config("spark.executor.memory", "256g") \
+    .config("spark.executor.cores", "32") \
+    .getOrCreate()
+
+# S3 bucket details
+bucket_name = "your-bucket"
+prefix = "path_to_folders/"  # Adjust if needed
+
+# List objects in the S3 bucket
+s3 = boto3.client("s3")
+response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+
+# Get first Parquet file found
+sample_file = None
+for obj in response.get("Contents", []):
+    if obj["Key"].endswith(".parquet"):
+        sample_file = f"s3://{bucket_name}/{obj['Key']}"
+        break
+
+if sample_file:
+    print(f"Using sample file: {sample_file}")
+
+    # Load one file to extract schema
+    sample_df = spark.read.parquet(sample_file)
+    schema = sample_df.schema
+
+    # Load all Parquet files using the schema
+    df = spark.read.schema(schema).parquet(f"s3://{bucket_name}/{prefix}")
+
+    df.show(5)
+else:
+    print("No Parquet files found!")
+    exit()
+
+# Filter out loans with <3 months of data
+df = df.groupBy("Loan ID").count().filter(col("count") > 3).join(df, "Loan ID")
+df = df.orderBy("Loan ID", "Accounting_Period")
+
+# Convert to time-series format
+df_grouped = df.groupBy("Loan ID", "Cluster_ID").agg(
+    collect_list("Payment Amount").alias("payment_series"),
+    collect_list("Remaining Balance").alias("balance_series"),
+    collect_list("Interest Rate").alias("rate_series"),
+    collect_list("Cost Basis Adjustment").alias("cost_series")
+)
+
+def train_lstm_autoencoder(X_train, time_steps=6, n_features=4):
+    model = Sequential([
+        LSTM(256, activation='relu', input_shape=(time_steps, n_features), return_sequences=False),
+        RepeatVector(time_steps),
+        LSTM(256, activation='relu', return_sequences=True),
+        TimeDistributed(Dense(n_features))
+    ])
+    model.compile(optimizer='adam', loss='mse')
+    with tf.device('/GPU:0'):
+        model.fit(X_train, X_train, epochs=50, batch_size=256, validation_split=0.1, verbose=1)
+    return model
+
+# Convert Spark DataFrame to Pandas
+df_lstm_train = df_grouped.toPandas()
+
+# Train separate LSTM models per cluster
+cluster_train_data = {}
+cluster_models = {}
+
+for cluster_id in df_lstm_train["Cluster_ID"].unique():
+    cluster_loans = df_lstm_train[df_lstm_train["Cluster_ID"] == cluster_id]
+    X_train = np.array([
+        np.column_stack([
+            np.array(row["payment_series"][:6]),
+            np.array(row["balance_series"][:6]),
+            np.array(row["rate_series"][:6]),
+            np.array(row["cost_series"][:6])
+        ])
+        for _, row in cluster_loans.iterrows()
+    ])
+    cluster_train_data[cluster_id] = X_train
+    cluster_models[cluster_id] = train_lstm_autoencoder(X_train)
+
+def detect_lstm_anomalies(X, model):
+    reconstructed_X = model.predict(X)
+    reconstruction_error = np.mean(np.square(X - reconstructed_X), axis=(1, 2))
+    threshold = np.percentile(reconstruction_error, 95)
+    anomalies = reconstruction_error > threshold
+    return anomalies, reconstruction_error
+
+# Run anomaly detection per cluster
+lstm_anomalies_results = []
+for cluster_id, model in cluster_models.items():
+    cluster_loans = df_lstm_train[df_lstm_train["Cluster_ID"] == cluster_id]
+    X_test = cluster_train_data[cluster_id]
+    anomalies, errors = detect_lstm_anomalies(X_test, model)
+    cluster_result = pd.DataFrame({
+        "Loan ID": cluster_loans["Loan ID"].values,
+        "Cluster_ID": cluster_id,
+        "LSTM_Anomaly": anomalies,
+        "Reconstruction Error": errors
+    })
+    lstm_anomalies_results.append(cluster_result)
+
+df_lstm_anomalies = pd.concat(lstm_anomalies_results)
+
+# Convert to Spark DataFrame and save to S3
+df_anomalies = spark.createDataFrame(df_lstm_anomalies)
+df_anomalies.write.mode("overwrite").parquet("s3://your-bucket/path_to_save/loan_anomalies.parquet")
