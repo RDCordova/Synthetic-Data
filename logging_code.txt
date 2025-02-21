@@ -1,0 +1,27 @@
+import tensorflow as tf
+
+class TrainingLogger(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        print(f"Epoch {epoch+1}: Loss = {logs['loss']:.6f}, Validation Loss = {logs['val_loss']:.6f}")
+
+def train_lstm_autoencoder(X_train, time_steps=6, n_features=4):
+    model = tf.keras.models.Sequential([
+        tf.keras.layers.LSTM(256, activation='relu', input_shape=(time_steps, n_features), return_sequences=False),
+        tf.keras.layers.RepeatVector(time_steps),
+        tf.keras.layers.LSTM(256, activation='relu', return_sequences=True),
+        tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(n_features))
+    ])
+    
+    model.compile(optimizer='adam', loss='mse')
+
+    with tf.device('/GPU:0'):
+        model.fit(
+            X_train, X_train, 
+            epochs=50, 
+            batch_size=256, 
+            validation_split=0.1, 
+            verbose=0,  # Set to 0 to avoid default logs
+            callbacks=[TrainingLogger()]  # Custom logging callback
+        )
+
+    return model
