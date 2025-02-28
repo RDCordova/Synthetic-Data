@@ -1,0 +1,98 @@
+import pandas as pd
+import numpy as np
+import json
+from collections import defaultdict
+
+def load_data(file_path: str) -> pd.DataFrame:
+    """Loads a CSV file into a Pandas DataFrame."""
+    return pd.read_csv(file_path)
+
+def infer_data_types(df: pd.DataFrame) -> dict:
+    """Infers data types for each column in the DataFrame."""
+    data_types = {}
+    for column in df.columns:
+        unique_values = df[column].dropna().unique()
+        if df[column].dtype in [np.int64, np.float64]:
+            data_types[column] = 'NUMERIC'
+        elif np.issubdtype(df[column].dtype, np.datetime64):
+            data_types[column] = 'DATE'
+        elif df[column].dtype == object and len(unique_values) > 20:
+            data_types[column] = 'CATEGORICAL'
+        else:
+            data_types[column] = 'TEXT'
+    return data_types
+
+def generate_sql_ddl(df: pd.DataFrame, table_name: str) -> str:
+    """Generates SQL DDL statements based on inferred data types."""
+    type_mapping = {'NUMERIC': 'FLOAT', 'CATEGORICAL': 'VARCHAR(255)', 'TEXT': 'TEXT', 'DATE': 'DATE'}
+    data_types = infer_data_types(df)
+    ddl_statements = [f"CREATE TABLE {table_name} ("]
+    ddl_statements += [f"    {col} {type_mapping[data_types[col]]}," for col in df.columns]
+    ddl_statements[-1] = ddl_statements[-1].rstrip(',')  # Remove last comma
+    ddl_statements.append(");")
+    return "\n".join(ddl_statements)
+
+def compute_null_rates(df: pd.DataFrame) -> dict:
+    """Computes null rates for all columns."""
+    return {col: df[col].isnull().mean() for col in df.columns}
+
+def compute_numerical_stats(df: pd.DataFrame) -> dict:
+    """Computes summary statistics for numerical columns."""
+    numerical_stats = {}
+    for column in df.select_dtypes(include=[np.number]).columns:
+        numerical_stats[column] = {
+            'min': df[column].min(),
+            'max': df[column].max(),
+            'mean': df[column].mean(),
+            'std': df[column].std(),
+            'null_rate': df[column].isnull().mean()
+        }
+    return numerical_stats
+
+def compute_categorical_stats(df: pd.DataFrame) -> dict:
+    """Computes category ratios for categorical columns."""
+    categorical_stats = {}
+    for column in df.columns:
+        if infer_data_types(df)[column] == 'CATEGORICAL':
+            value_counts = df[column].value_counts(normalize=True).to_dict()
+            categorical_stats[column] = {
+                'value_ratios': value_counts,
+                'null_rate': df[column].isnull().mean()
+            }
+    return categorical_stats
+
+def compute_date_stats(df: pd.DataFrame) -> dict:
+    """Computes date range for date columns."""
+    date_stats = {}
+    for column in df.columns:
+        if infer_data_types(df)[column] == 'DATE':
+            date_stats[column] = {
+                'min_date': str(df[column].min()),
+                'max_date': str(df[column].max()),
+                'null_rate': df[column].isnull().mean()
+            }
+    return date_stats
+
+def detect_text_columns(df: pd.DataFrame) -> list:
+    """Identifies text-based columns."""
+    text_columns = [col for col in df.columns if infer_data_types(df)[col] == 'TEXT']
+    return text_columns
+
+def generate_profile_report(df: pd.DataFrame, table_name: str) -> dict:
+    """Generates a structured data profiling report."""
+    report = {
+        'sql_ddl': generate_sql_ddl(df, table_name),
+        'numerical_stats': compute_numerical_stats(df),
+        'categorical_stats': compute_categorical_stats(df),
+        'date_stats': compute_date_stats(df),
+        'text_columns': detect_text_columns(df),
+        'null_rates': compute_null_rates(df)
+    }
+    return json.dumps(report, indent=4)
+
+# Example Usage
+if __name__ == "__main__":
+    file_path = "data.csv"  # Replace with actual file path
+    df = load_data(file_path)
+    report = generate_profile_report(df, "sample_table")
+    print(report)
