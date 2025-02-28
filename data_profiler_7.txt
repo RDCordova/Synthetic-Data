@@ -1,0 +1,102 @@
+import pandas as pd
+import numpy as np
+import json
+
+def load_data(file_path: str) -> pd.DataFrame:
+    """Loads a CSV file into a Pandas DataFrame."""
+    return pd.read_csv(file_path, parse_dates=True, infer_datetime_format=True)
+
+def infer_data_types(df: pd.DataFrame) -> dict:
+    """Infers data types for each column in the DataFrame."""
+    data_types = {}
+    for column in df.columns:
+        col_data = df[column].dropna()
+        unique_values = col_data.unique()
+        
+        if pd.api.types.is_numeric_dtype(df[column]):
+            data_types[column] = 'NUMERIC'
+        elif pd.api.types.is_datetime64_any_dtype(df[column]) or pd.to_datetime(col_data, errors='coerce').notna().all():
+            data_types[column] = 'DATE'
+            df[column] = pd.to_datetime(df[column], errors='coerce')
+        elif df[column].dtype == object and len(unique_values) <= 20:
+            data_types[column] = 'CATEGORICAL'
+        else:
+            data_types[column] = 'TEXT'
+    return data_types
+
+def generate_genrocket_ddl(df: pd.DataFrame, table_name: str) -> dict:
+    """Generates a GenRocket-compatible DDL JSON based on the DataFrame."""
+    data_types = infer_data_types(df)
+    columns = []
+
+    for column in df.columns:
+        col_data = df[column].dropna()
+        col_type = data_types[column]
+        null_percentage = float(df[column].isnull().mean()) if df[column].isnull().any() else None
+        
+        col_info = {
+            "name": column,
+            "type": {
+                "datatype": "",
+                "maxLength": None,
+                "nullable": bool(df[column].isnull().any())
+            },
+            "metadata": {
+                "hint": "",
+                "observedCharacters": "",
+                "maxCharLength": None,
+                "minCharLength": None,
+                "maxValue": None,
+                "minValue": None
+            }
+        }
+
+        if null_percentage is not None:
+            col_info["metadata"]["nullPercentage"] = null_percentage
+
+        if col_type == 'NUMERIC':
+            col_info["type"]["datatype"] = "FLOAT" if df[column].dtype == float else "INT"
+            col_info["metadata"]["maxValue"] = float(col_data.max()) if not col_data.empty else None
+            col_info["metadata"]["minValue"] = float(col_data.min()) if not col_data.empty else None
+            col_info["metadata"]["stdDeviation"] = float(col_data.std()) if not col_data.empty else None
+        elif col_type == 'DATE':
+            col_info["type"]["datatype"] = "DATE"
+            col_info["metadata"]["maxValue"] = str(col_data.max()) if not col_data.empty else None
+            col_info["metadata"]["minValue"] = str(col_data.min()) if not col_data.empty else None
+        elif col_type == 'CATEGORICAL':
+            col_info["type"]["datatype"] = "VARCHAR"
+            col_info["type"]["maxLength"] = int(col_data.str.len().max()) if not col_data.empty else None
+            col_info["metadata"]["ratios"] = {str(k): float(v) for k, v in df[column].value_counts(normalize=True).to_dict().items()} if not col_data.empty else None
+        else:  # TEXT
+            col_info["type"]["datatype"] = "TEXT"
+            col_info["type"]["maxLength"] = int(col_data.str.len().max()) if not col_data.empty else None
+            col_info["metadata"]["maxCharLength"] = int(col_data.str.len().max()) if not col_data.empty else None
+            col_info["metadata"]["minCharLength"] = int(col_data.str.len().min()) if not col_data.empty else None
+
+        columns.append(col_info)
+
+    ddl = [{
+        "name": table_name,
+        "columns": columns
+    }]
+
+    return ddl
+
+def generate_profile_report(df: pd.DataFrame, table_name: str) -> str:
+    """Generates a structured data profiling report."""
+    ddl_json = generate_genrocket_ddl(df, table_name)
+    report = {
+        'genrocket_ddl': ddl_json
+    }
+    report_json = json.dumps(report, indent=4)
+    with open(f"{table_name}_profile.json", "w") as f:
+        f.write(report_json)
+    return report_json
+
+# Example Usage
+if __name__ == "__main__":
+    file_path = "data.csv"  # Replace with actual file path
+    df = load_data(file_path)
+    report = generate_profile_report(df, "sample_table")
+    print(report)
+
