@@ -1,0 +1,48 @@
+import boto3
+import json
+import time
+import numpy as np
+
+# Initialize Amazon Bedrock client
+bedrock = boto3.client("bedrock-runtime")
+
+MAX_CHARACTERS = 32000  # Titan's safe limit
+BATCH_SIZE = 5  # Adjust based on API performance
+
+def get_titan_embeddings_batch(texts):
+    """Generate embeddings for a batch of texts using Amazon Titan with progress tracking."""
+    batched_embeddings = []
+    total_batches = len(texts) // BATCH_SIZE + (1 if len(texts) % BATCH_SIZE != 0 else 0)
+    
+    start_time = time.time()  # Start timing
+    
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch = texts[i:i+BATCH_SIZE]  # Select batch
+        embeddings = []
+        batch_start_time = time.time()  # Track batch time
+        
+        for text in batch:
+            truncated_text = text[:MAX_CHARACTERS]  # Ensure within token limit
+
+            response = bedrock.invoke_model(
+                modelId="amazon.titan-embed-text-v1",
+                contentType="application/json",
+                accept="application/json",
+                body=json.dumps({"inputText": truncated_text})
+            )
+            embedding = json.loads(response["body"].read())["embedding"]
+            embeddings.append(embedding)
+
+        batched_embeddings.extend(embeddings)
+        
+        # Progress tracking
+        batch_time = time.time() - batch_start_time
+        elapsed_time = time.time() - start_time
+        avg_time_per_batch = elapsed_time / (i // BATCH_SIZE + 1)
+        remaining_batches = total_batches - (i // BATCH_SIZE + 1)
+        estimated_remaining_time = remaining_batches * avg_time_per_batch
+
+        print(f"Processed {i+len(batch)}/{len(texts)} embeddings | Batch Time: {batch_time:.2f}s | Estimated Remaining: {estimated_remaining_time:.2f}s")
+
+    return batched_embeddings
+
