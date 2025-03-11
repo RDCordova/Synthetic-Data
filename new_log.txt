@@ -1,0 +1,64 @@
+import json
+import boto3
+import time
+import pandas as pd
+import cudf
+from datetime import datetime, timedelta
+
+# Initialize Amazon Bedrock client
+bedrock = boto3.client("bedrock-runtime")
+
+MAX_CHARACTERS = 32000  # Safe limit for Titan
+
+def load_logs(json_file):
+    """Loads system logs into a GPU-accelerated DataFrame (cuDF)."""
+    with open(json_file, "r") as f:
+        data = json.load(f)
+    
+    df = cudf.DataFrame(data["logs"])
+    df["timestamp"] = cudf.to_datetime(df["_time"])  # Convert timestamps
+    return df
+
+def chunk_logs_with_max_length(df, window_minutes=10, max_length=MAX_CHARACTERS):
+    """Chunks logs into time-based groups while ensuring each chunk stays within max_length."""
+    df = df.sort_values("timestamp")
+    df["chunk_id"] = (df["timestamp"] - df["timestamp"].min()) // timedelta(minutes=window_minutes)
+
+    # Handle None values
+    df["CWmessage"] = df["CWmessage"].fillna("")
+
+    # Initialize lists for new chunks
+    final_chunks = []
+    current_chunk = []
+    current_length = 0
+    last_timestamp = None
+    chunk_id = 0
+
+    for _, row in df.iterrows():
+        message = f"[{row['timestamp']}] {row['CWmessage']}\n"
+        message_length = len(message)
+
+        # If adding this message exceeds max_length, store current chunk and start a new one
+        if current_length + message_length > max_length:
+            final_chunks.append({"chunk_id": chunk_id, "timestamp": last_timestamp, "formatted_logs": "".join(current_chunk)})
+            chunk_id += 1  # Increment chunk ID
+            current_chunk = []  # Reset chunk
+            current_length = 0  # Reset length
+
+        # Add message to chunk
+        current_chunk.append(message)
+        current_length += message_length
+        last_timestamp = row["timestamp"]
+
+    # Append the last remaining chunk
+    if current_chunk:
+        final_chunks.append({"chunk_id": chunk_id, "timestamp": last_timestamp, "formatted_logs": "".join(current_chunk)})
+
+    return pd.DataFrame(final_chunks)  # Convert to Pandas for further processing
+
+# Load and process logs
+json_file = "system_logs.json"
+df_logs = load_logs(json_file)
+df_chunked = chunk_logs_with_max_length(df_logs, window_minutes=10)
+
+print(df_chunked.head())  # Verify chunking results
