@@ -1,0 +1,121 @@
+
+import json
+import boto3
+import time
+import pandas as pd
+import cudf  # GPU-accelerated Pandas
+import faiss
+import numpy as np
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from botocore.config import Config
+
+# Initialize Amazon Bedrock client with optimized settings
+bedrock = boto3.client(
+    "bedrock-runtime",
+    region_name="us-west-2",
+    config=Config(max_pool_connections=50)  # Allow multiple parallel API requests
+)
+
+# **Safe Character Limits**
+MAX_CHARACTERS = 16000  # Conservative limit (well below Titan's 8192-token max)
+OVERLAP_CHARACTERS = 4000  # Overlap to retain context
+BATCH_SIZE = 5  # Adjust for best performance
+MAX_WORKERS = 8  # Threads for parallel API calls
+
+### **Step 1: Load and Chunk Logs (With First-Pass Splitting)**
+def load_logs(json_file):
+    """Loads system logs into a GPU-accelerated DataFrame (cuDF)."""
+    with open(json_file, "r") as f:
+        data = json.load(f)
+    
+    df = cudf.DataFrame(data["logs"])
+    df["timestamp"] = cudf.to_datetime(df["_time"])  # Convert timestamps
+    return df
+
+def chunk_logs_with_max_length(df, window_minutes=10, max_chars=16000, overlap_chars=4000):
+    """Chunks logs into time-based groups while ensuring each chunk stays within Titan's character limit."""
+    df = df.sort_values("timestamp")
+    df["chunk_id"] = (df["timestamp"] - df["timestamp"].min()) // timedelta(minutes=window_minutes)
+
+    # Handle None values
+    df["CWmessage"] = df["CWmessage"].fillna("")
+
+    final_chunks = []
+    chunk_id = 0
+
+    for _, row in df.iterrows():
+        message = f"[{row['timestamp']}] {row['CWmessage']}\n"
+
+        # **Split messages immediately if they exceed max_chars**
+        if len(message) > max_chars:
+            start = 0
+            while start < len(message):
+                end = min(start + max_chars, len(message))
+                chunked_message = message[start:end]
+                final_chunks.append({"chunk_id": chunk_id, "timestamp": row["timestamp"], "formatted_logs": chunked_message})
+                start = end - overlap_chars  # Overlap ensures no data loss
+                chunk_id += 1  # Unique ID for each split chunk
+        else:
+            final_chunks.append({"chunk_id": chunk_id, "timestamp": row["timestamp"], "formatted_logs": message})
+            chunk_id += 1
+
+    return pd.DataFrame(final_chunks)  # Convert to Pandas for further processing
+
+### **Step 2: Parallel Embedding Generation**
+def embed_text(text):
+    """Call Amazon Titan to generate an embedding for a single text."""
+    response = bedrock.invoke_model(
+        modelId="amazon.titan-embed-text-v1",
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps({"inputText": text})
+    )
+    return json.loads(response["body"].read())["embedding"]
+
+def get_titan_embeddings_parallel(texts, max_workers=MAX_WORKERS):
+    """Parallel processing for embedding generation using ThreadPoolExecutor."""
+    start_time = time.time()
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        embeddings = list(executor.map(embed_text, texts))
+
+    elapsed_time = time.time() - start_time
+    print(f"✅ Completed embedding generation in {elapsed_time:.2f}s for {len(texts)} texts.")
+    return embeddings
+
+### **Step 3: Store Embeddings in FAISS (GPU-Accelerated)**
+def store_embeddings_in_faiss(df):
+    """Stores embeddings in FAISS using GPU acceleration."""
+    embeddings = np.vstack(df["embedding"].values).astype("float32")
+
+    # Move FAISS to GPU
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    res = faiss.StandardGpuResources()
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, index)
+    gpu_index.add(embeddings)
+
+    # Save FAISS index
+    faiss.write_index(gpu_index, "faiss_gpu_index.idx")
+    df.to_parquet("chunked_log_embeddings.parquet", index=False)
+
+    print("✅ Embeddings stored in FAISS-GPU and saved successfully.")
+
+### **Step 4: Full Pipeline Execution**
+# Load and process logs
+json_file = "system_logs.json"
+df_logs = load_logs(json_file)
+
+# Apply time-based chunking with built-in text splitting
+df_chunked = chunk_logs_with_max_length(df_logs, window_minutes=10)
+
+# Convert to Pandas for compatibility
+df_chunked = df_chunked.to_pandas()
+
+# Generate embeddings using parallel processing
+df_chunked["embedding"] = get_titan_embeddings_parallel(df_chunked["formatted_logs"].tolist())
+
+# Store embeddings in FAISS-GPU
+store_embeddings_in_faiss(df_chunked)
+
+print("✅ Full embedding pipeline completed successfully.")
