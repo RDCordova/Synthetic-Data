@@ -1,0 +1,171 @@
+import faiss
+import pandas as pd
+import os
+import json
+import numpy as np
+import boto3
+import time
+from datetime import datetime
+
+# File paths
+FAISS_INDEX_PATH = "faiss_index.idx"
+EMBEDDING_DATA_PATH = "chunked_log_embeddings.parquet"
+CSV_PATH = "expected_monthly_events.csv"
+NEW_LOGS_STORAGE_PATH = "new_logs.parquet"
+
+# Initialize Amazon Bedrock client
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+EMBED_MODEL_ID = "amazon.titan-embed-text-v1"
+CLAUDE_MODEL_ID = "anthropic.claude-3-5-sonnet-20240620"
+
+# Load FAISS Index and Historical Logs
+def load_faiss_index():
+    """Loads FAISS index and historical log embeddings."""
+    cpu_index = faiss.read_index(FAISS_INDEX_PATH)
+    df = pd.read_parquet(EMBEDDING_DATA_PATH)
+    return cpu_index, df
+
+# Load expected monthly events from CSV
+def load_expected_events():
+    """Load expected monthly events from a CSV file."""
+    df = pd.read_csv(CSV_PATH)
+    return df.to_dict(orient="records")
+
+# Load new logs from storage
+def load_new_logs():
+    """Load stored new logs or initialize an empty DataFrame."""
+    if os.path.exists(NEW_LOGS_STORAGE_PATH):
+        return pd.read_parquet(NEW_LOGS_STORAGE_PATH)
+    else:
+        return pd.DataFrame(columns=["timestamp", "log_message"])
+
+# Save new logs to storage
+def save_new_logs(df):
+    """Save new logs to persistent storage."""
+    df.to_parquet(NEW_LOGS_STORAGE_PATH, index=False)
+
+# Load all data
+faiss_index, df_logs = load_faiss_index()
+EXPECTED_MONTHLY_EVENTS = load_expected_events()
+df_new_logs = load_new_logs()
+
+print(f"✅ Loaded {len(df_logs)} historical log embeddings.")
+print(f"✅ Loaded {len(EXPECTED_MONTHLY_EVENTS)} expected monthly events.")
+print(f"✅ Loaded {len(df_new_logs)} previously seen logs.")
+
+# 🚀 Step 1: Define Helper Functions for Token Estimation & Dynamic Chunking
+def estimate_token_count(text):
+    """Estimate the number of tokens in a text string."""
+    return len(text.split())  # Approximate tokens based on words
+
+def chunk_logs(df_logs, max_tokens=8192):
+    """Splits logs into chunks that stay within Claude's token limit."""
+    
+    chunk = []
+    chunk_token_count = 0
+    for _, row in df_logs.iterrows():
+        log_entry = f"[{row['timestamp']}] {row['formatted_logs']}"
+        log_tokens = estimate_token_count(log_entry)
+
+        # If adding this log exceeds the max token limit, yield the current chunk and start a new one
+        if chunk_token_count + log_tokens > max_tokens:
+            yield chunk  # Yield current chunk
+            chunk = []  # Start new chunk
+            chunk_token_count = 0  # Reset token counter
+        
+        chunk.append(log_entry)
+        chunk_token_count += log_tokens
+
+    if chunk:
+        yield chunk  # Yield the last chunk
+
+# 🚀 Step 2: Train Claude on Historical Logs with Dynamic Chunking & Progress Tracking
+def invoke_claude(prompt):
+    """Invoke Claude 3.5 via Amazon Bedrock and return its response."""
+    response = bedrock.invoke_model(
+        modelId=CLAUDE_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps({"inputText": prompt})
+    )
+    return json.loads(response["body"].read())["outputText"]
+
+def train_claude_on_logs():
+    """Train Claude 3.5 on logs while dynamically resizing chunks if needed."""
+    
+    # Sort logs by timestamp
+    df_logs_sorted = df_logs.sort_values(by="timestamp")
+
+    # Format expected monthly events
+    expected_events_str = "\n".join([
+        f"- Process: {event['process_name']}, Data Set ID: {event['data_set_id']}, Event Type: {event['event_type_name']}"
+        for event in EXPECTED_MONTHLY_EVENTS
+    ])
+
+    # Count total chunks for tracking
+    total_chunks = len(list(chunk_logs(df_logs_sorted)))  # Count before iterating
+    print(f"\n🔹 Training Claude on {total_chunks} adaptive chunks of logs...")
+
+    training_results = []
+    start_time = time.time()
+
+    # Train on each chunk separately
+    for chunk_index, chunk in enumerate(chunk_logs(df_logs_sorted), start=1):
+        chunk_start_time = time.time()  # Track chunk start time
+
+        past_logs_str = "\n".join(chunk)  # Convert chunk to text
+
+        # Ensure token count is within limit
+        while estimate_token_count(past_logs_str) > 8192:
+            print(f"⚠️ Chunk {chunk_index} is too large! Splitting further...")
+            chunk = chunk[:len(chunk) // 2]  # Reduce chunk size by half
+            past_logs_str = "\n".join(chunk)
+
+        # Create structured training prompt
+        training_prompt = f"""
+        You are an AI analyzing system logs to detect anomalies.
+
+        **1. Expected Monthly Events:**
+        {expected_events_str}
+
+        **2. Historical Log Data (Batch {chunk_index}/{total_chunks}):**
+        Below is a batch of past system logs with timestamps:
+        {past_logs_str}
+
+        **Task:**
+        - Identify common log patterns.
+        - Explain the typical sequence of events.
+        - Detect any inconsistencies or anomalies.
+        - Compare past logs with the expected monthly events and highlight missing or duplicate occurrences.
+
+        Provide your analysis in a structured format.
+        """
+
+        # Invoke Claude for each batch
+        try:
+            training_summary = invoke_claude(training_prompt)
+            training_results.append(training_summary)
+
+            # Track chunk completion time
+            chunk_time = time.time() - chunk_start_time
+            remaining_chunks = total_chunks - chunk_index
+            estimated_time_remaining = (chunk_time * remaining_chunks) / 60  # Convert to minutes
+
+            print(f"✅ Completed Chunk {chunk_index}/{total_chunks} in {chunk_time:.2f} sec. Estimated time left: {estimated_time_remaining:.2f} min.")
+
+        except Exception as e:
+            print(f"❌ Error processing chunk {chunk_index}: {e}")
+
+    # Calculate total training time
+    total_time = (time.time() - start_time) / 60  # Convert to minutes
+
+    # Combine results from all chunks
+    final_training_summary = "\n\n".join(training_results)
+
+    print(f"\n🎯 Training completed in {total_time:.2f} minutes! Claude has learned from all logs.\n")
+
+    return final_training_summary
+
+# Train Claude
+training_summary = train_claude_on_logs()
+print("\n🔹 Claude's Updated Training Summary:\n", training_summary)
