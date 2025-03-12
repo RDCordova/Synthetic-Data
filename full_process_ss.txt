@@ -1,0 +1,213 @@
+import faiss
+import pandas as pd
+import os
+import json
+import numpy as np
+import boto3
+import time
+from datetime import datetime
+
+# File paths
+FAISS_INDEX_PATH = "faiss_index.idx"
+EMBEDDING_DATA_PATH = "chunked_log_embeddings.parquet"
+CSV_PATH = "expected_monthly_events.csv"
+NEW_LOGS_STORAGE_PATH = "new_logs.parquet"
+
+# Initialize Amazon Bedrock client
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+EMBED_MODEL_ID = "amazon.titan-embed-text-v1"
+CLAUDE_MODEL_ID = "anthropic.claude-3-5-sonnet-20240620"
+
+# Load FAISS Index and Historical Logs
+def load_faiss_index():
+    """Loads FAISS index and historical log embeddings."""
+    cpu_index = faiss.read_index(FAISS_INDEX_PATH)
+    df = pd.read_parquet(EMBEDDING_DATA_PATH)
+    return cpu_index, df
+
+# Load expected monthly events from CSV
+def load_expected_events():
+    """Load expected monthly events from a CSV file."""
+    df = pd.read_csv(CSV_PATH)
+    return df.to_dict(orient="records")
+
+# Load new logs from storage
+def load_new_logs():
+    """Load stored new logs or initialize an empty DataFrame."""
+    if os.path.exists(NEW_LOGS_STORAGE_PATH):
+        return pd.read_parquet(NEW_LOGS_STORAGE_PATH)
+    else:
+        return pd.DataFrame(columns=["timestamp", "log_message"])
+
+# Save new logs to storage
+def save_new_logs(df):
+    """Save new logs to persistent storage without removing duplicates."""
+    df.to_parquet(NEW_LOGS_STORAGE_PATH, index=False)
+
+# Load all data
+faiss_index, df_logs = load_faiss_index()
+EXPECTED_MONTHLY_EVENTS = load_expected_events()
+df_new_logs = load_new_logs()
+
+print(f"✅ Loaded {len(df_logs)} historical log embeddings.")
+print(f"✅ Loaded {len(EXPECTED_MONTHLY_EVENTS)} expected monthly events.")
+print(f"✅ Loaded {len(df_new_logs)} previously seen logs.")
+
+# 🚀 Step 1: Train Claude 3.5 on Historical Logs Using Chunks
+def chunk_logs(df_logs, chunk_size=10000):
+    """Splits the logs into smaller chunks to stay within Claude's input limit."""
+    for i in range(0, len(df_logs), chunk_size):
+        yield df_logs.iloc[i:i + chunk_size]
+
+def train_claude_on_logs():
+    """Train Claude 3.5 on logs in smaller chunks to avoid API limits."""
+    
+    # Sort logs by timestamp
+    df_logs_sorted = df_logs.sort_values(by="timestamp")
+
+    # Format expected monthly events
+    expected_events_str = "\n".join([
+        f"- Process: {event['process_name']}, Data Set ID: {event['data_set_id']}, Event Type: {event['event_type_name']}"
+        for event in EXPECTED_MONTHLY_EVENTS
+    ])
+
+    # Store training results from each chunk
+    training_results = []
+
+    # Train on each chunk separately
+    for chunk in chunk_logs(df_logs_sorted):
+        
+        # Convert formatted logs into structured text
+        past_logs_str = "\n".join([
+            f"[{row['timestamp']}] {row['formatted_logs']}"
+            for _, row in chunk.iterrows()
+        ])
+
+        # Create structured training prompt
+        training_prompt = f"""
+        You are an AI analyzing system logs to detect anomalies.
+
+        **1. Expected Monthly Events:**
+        These events must occur each month. If they are missing, it indicates an issue:
+        {expected_events_str}
+
+        **2. Historical Log Data (Batch Processing):**
+        Below is a batch of past system logs with timestamps:
+        {past_logs_str}
+
+        **Task:**
+        - Identify common log patterns.
+        - Explain the typical sequence of events.
+        - Detect any inconsistencies or anomalies.
+        - Compare past logs with the expected monthly events and highlight missing or duplicate occurrences.
+
+        Provide your analysis in a structured format.
+        """
+
+        # Invoke Claude for each batch
+        training_summary = invoke_claude(training_prompt)
+        training_results.append(training_summary)
+
+    # Combine results from all chunks
+    final_training_summary = "\n\n".join(training_results)
+
+    return final_training_summary
+
+# Train Claude
+training_summary = train_claude_on_logs()
+print("\n🔹 Claude's Updated Training Summary:\n", training_summary)
+
+# 🚀 Step 2: Process New Logs & Store Them Without Removing Duplicates
+def process_new_logs(new_logs):
+    """Process new logs and update storage without removing duplicates."""
+    global df_new_logs
+
+    # Convert new logs into DataFrame
+    new_logs_df = pd.DataFrame(new_logs, columns=["timestamp", "log_message"])
+
+    # Append new logs to stored logs (without removing duplicates)
+    df_new_logs = pd.concat([df_new_logs, new_logs_df]).reset_index(drop=True)
+
+    # Save updated logs back to storage
+    save_new_logs(df_new_logs)
+
+    print(f"✅ Stored {len(new_logs_df)} new logs.")
+
+# 🚀 Step 3: Use FAISS to Find Similar Logs, Then Use Claude to Confirm Duplicates
+def check_for_duplicate_logs(new_logs):
+    """Use FAISS to find similar logs, then use Claude 3.5 to determine if they are true duplicates."""
+    
+    # Convert new logs into embeddings and perform FAISS search
+    similar_logs = []
+    for log in new_logs:
+        embedding = get_embedding(log)
+        similar_logs.append(search_faiss(embedding))
+
+    # Combine search results into a DataFrame
+    similar_logs_df = pd.concat(similar_logs).drop_duplicates().reset_index(drop=True)
+
+    # Convert logs to text format
+    new_logs_str = "\n".join(new_logs)
+    similar_logs_str = "\n".join(similar_logs_df["log_message"].tolist())
+
+    # Create prompt for Claude
+    duplicate_check_prompt = f"""
+    You are analyzing system logs to detect duplicate events.
+
+    **1. New Logs (received today):**
+    {new_logs_str}
+
+    **2. Similar Logs Found Using FAISS:**
+    {similar_logs_str}
+
+    **Task:**
+    - Compare the new logs against the most similar logs.
+    - Identify logs that represent the **same event occurring multiple times**.
+    - Determine if these logs are actual duplicates or separate occurrences.
+    - Provide a structured JSON output with the following format:
+    
+    {{
+        "duplicate_files_found": ["List of duplicate log messages"]
+    }}
+
+    Ensure your response follows this JSON format exactly.
+    """
+
+    # Invoke Claude 3.5
+    response = invoke_claude(duplicate_check_prompt)
+
+    # Parse response as JSON
+    try:
+        structured_output = json.loads(response)
+    except json.JSONDecodeError:
+        print("⚠️ Claude returned an invalid JSON response. Check formatting.")
+        structured_output = {"duplicate_files_found": []}
+
+    return structured_output["duplicate_files_found"]
+
+# 🚀 Step 4: Generate Final Report
+def generate_final_report(new_logs):
+    """Run anomaly detection and compile results."""
+    
+    # Detect duplicate logs
+    duplicate_logs = check_for_duplicate_logs([log[1] for log in new_logs])
+
+    # Compile final structured report
+    final_report = {
+        "duplicate_files_found": duplicate_logs
+    }
+
+    print("\n🔹 Final Duplicate Log Detection Report:\n", json.dumps(final_report, indent=4))
+    return final_report
+
+# Example new logs received today
+new_logs_today = [
+    ("2025-03-11 10:15:00", "File upload: sales_data_2025_03.csv"),
+    ("2025-03-11 10:20:00", "Processing error detected for sales_data_2025_03.csv"),
+    ("2025-03-11 10:30:00", "Backup completed for sales_data_2025_03.csv")
+]
+
+# Process new logs and generate report
+process_new_logs(new_logs_today)
+final_report = generate_final_report(new_logs_today)
+
