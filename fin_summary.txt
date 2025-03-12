@@ -1,0 +1,111 @@
+def generate_final_training_summary(chunk_summaries):
+    """Uses Claude 3.5 to create a final summary combining all chunk summaries."""
+
+    # Convert list of chunk summaries to a structured text format
+    chunk_summaries_str = "\n\n".join(f"Chunk {i+1}: {summary}" for i, summary in enumerate(chunk_summaries))
+
+    # Create a structured prompt for Claude
+    final_summary_prompt = f"""
+    You have analyzed system logs in multiple chunks. Below are the summaries of each chunk:
+
+    {chunk_summaries_str}
+
+    **Task:**
+    - Combine key findings into a **single comprehensive summary**.
+    - Identify **major trends** and **log patterns**.
+    - Highlight **common anomalies** found across all chunks.
+    - Ensure the final summary is **concise but retains important details**.
+
+    Provide the final structured summary.
+    """
+
+    # Invoke Claude to generate the final summary
+    final_summary = invoke_claude(final_summary_prompt)
+    
+    # Save the final summary
+    save_training_summary(final_summary)
+
+    return final_summary
+
+def train_claude_on_logs():
+    """Train Claude 3.5 on logs using chunking, then generate a final summary."""
+    
+    # Check if training summary already exists
+    existing_summary = load_training_summary()
+    if existing_summary:
+        return existing_summary  # Return cached summary if available
+
+    print("\n🔹 No existing training summary found. Starting training...")
+
+    # Sort logs by timestamp
+    df_logs_sorted = df_logs.sort_values(by="timestamp")
+
+    # Format expected monthly events
+    expected_events_str = "\n".join([
+        f"- Process: {event['process_name']}, Data Set ID: {event['data_set_id']}, Event Type: {event['event_type_name']}"
+        for event in EXPECTED_MONTHLY_EVENTS
+    ])
+
+    total_chunks = len(list(chunk_logs(df_logs_sorted)))  # Count chunks
+    print(f"\n🔹 Training Claude on {total_chunks} chunks of logs...")
+
+    training_results = []
+    start_time = time.time()
+
+    # Train on each chunk separately
+    for chunk_index, chunk in enumerate(chunk_logs(df_logs_sorted), start=1):
+        chunk_start_time = time.time()  
+
+        past_logs_str = "\n".join(chunk)  
+
+        # Ensure token count is within limit
+        while estimate_token_count(past_logs_str) > MAX_TOKENS_FOR_LOGS:
+            print(f"⚠️ Chunk {chunk_index} is too large! Splitting further...")
+            chunk = chunk[:len(chunk) // 2]  
+            past_logs_str = "\n".join(chunk)
+
+        # Create structured training prompt
+        training_prompt = f"""
+        You are an AI analyzing system logs to detect anomalies.
+
+        **1. Expected Monthly Events:**
+        {expected_events_str}
+
+        **2. Historical Log Data (Batch {chunk_index}/{total_chunks}):**
+        Below is a batch of past system logs with timestamps:
+        {past_logs_str}
+
+        **Task:**
+        - Identify common log patterns.
+        - Explain the typical sequence of events.
+        - Detect any inconsistencies or anomalies.
+        - Compare past logs with the expected monthly events and highlight missing or duplicate occurrences.
+
+        Provide your analysis in a structured format.
+        """
+
+        # Invoke Claude for each batch
+        try:
+            training_summary = invoke_claude(training_prompt)
+            training_results.append(training_summary)
+
+            chunk_time = time.time() - chunk_start_time
+            remaining_chunks = total_chunks - chunk_index
+            estimated_time_remaining = (chunk_time * remaining_chunks) / 60  
+
+            print(f"✅ Completed Chunk {chunk_index}/{total_chunks} in {chunk_time:.2f} sec. Estimated time left: {estimated_time_remaining:.2f} min.")
+
+        except Exception as e:
+            print(f"❌ Error processing chunk {chunk_index}: {e}")
+
+    # Generate a final training summary from all chunk summaries
+    final_training_summary = generate_final_training_summary(training_results)
+
+    total_time = (time.time() - start_time) / 60  
+    print(f"\n🎯 Training completed in {total_time:.2f} minutes! Claude has learned from all logs.\n")
+
+    return final_training_summary
+
+# Train Claude and save the summary
+training_summary = train_claude_on_logs()
+print("\n🔹 Claude's Final Training Summary:\n", training_summary)
