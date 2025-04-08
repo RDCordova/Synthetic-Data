@@ -1,0 +1,18 @@
+import pandas as pd
+import glob
+import os
+
+# Get current directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Find all Parquet files in the current directory
+parquet_files = glob.glob(os.path.join(current_dir, '*.parquet'))
+
+# Read and concatenate all Parquet files
+df_list = [pd.read_parquet(f) for f in parquet_files]
+merged_df = pd.concat(df_list, ignore_index=True)
+
+# Optional: save to disk
+# merged_df.to_parquet('merged_output.parquet', index=False)
+
+print("Merged DataFrame shape:", merged_df.shape)
