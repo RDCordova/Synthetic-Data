@@ -1,0 +1,43 @@
+SELECT 
+    COALESCE(m.business_unit, y.business_unit) AS business_unit,
+
+    -- Monthly values
+    m.total_actual_spend AS month_actual,
+    m.total_budgeted_amount AS month_budget,
+    m.total_variance AS month_variance,
+
+    -- YTD values
+    y.total_actual_spend AS ytd_actual,
+    y.total_budgeted_amount AS ytd_budget,
+    y.total_variance AS ytd_variance,
+
+    -- Variance Contribution
+    ROUND(y.total_variance * 1.0 / y.total_variance_sum, 4) AS variance_contribution
+
+FROM
+    -- Monthly summary
+    (
+        SELECT 
+            business_unit,
+            SUM(actual_spend) AS total_actual_spend,
+            SUM(budgeted_amount) AS total_budgeted_amount,
+            SUM(actual_spend) - SUM(budgeted_amount) AS total_variance
+        FROM department_budget
+        WHERE reporting_period = '2025-03'
+        GROUP BY business_unit
+    ) m
+
+FULL OUTER JOIN
+    -- YTD summary with variance total using window function
+    (
+        SELECT 
+            business_unit,
+            SUM(actual_spend) AS total_actual_spend,
+            SUM(budgeted_amount) AS total_budgeted_amount,
+            SUM(actual_spend) - SUM(budgeted_amount) AS total_variance,
+            SUM(SUM(actual_spend) - SUM(budgeted_amount)) OVER () AS total_variance_sum
+        FROM department_budget
+        WHERE reporting_period BETWEEN '2025-01' AND '2025-03'
+        GROUP BY business_unit
+    ) y
+ON m.business_unit = y.business_unit
