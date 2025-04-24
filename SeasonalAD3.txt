@@ -1,0 +1,106 @@
+import pandas as pd
+import pickle
+from adtk.detector import SeasonalAD, PersistAD
+from adtk.data import validate_series
+from statsmodels.tsa.stattools import acf
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import os
+import time
+import logging
+import warnings
+
+# --- SETUP ---
+warnings.filterwarnings("ignore")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+BASE_DIR = Path(os.getcwd()) / "seasonad_output"
+MODEL_DIR = BASE_DIR / "models"
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+print(f"✅ Base directory set to: {BASE_DIR}")
+
+# --- SETTINGS ---
+CSV_FILE = "your_file.csv"  # Update with your file name
+NUM_WORKERS = 8
+
+# --- LOAD DATA ---
+logging.info("Loading CSV...")
+df = pd.read_csv(CSV_FILE, parse_dates=[0])
+df.set_index(df.columns[0], inplace=True)
+df = df.sort_index()
+df = df.apply(pd.to_numeric, errors="coerce").fillna(0).astype("float32")
+
+# --- SPLIT DATA ---
+train_df = df["2024-12-01":"2025-02-28"]
+test_df = df["2025-03-01":"2025-03-31"]
+
+# --- SEASONALITY CHECK ---
+def has_strong_seasonality(series, threshold=0.5, lag=7):
+    if series.std() == 0:
+        return False
+    autocorr = acf(series.dropna(), nlags=lag, fft=True)
+    return abs(autocorr[lag]) > threshold
+
+# --- MAIN WORKER FUNCTION ---
+model_types = {}  # Save model type per column
+
+def train_and_detect(col_name):
+    try:
+        train_series = validate_series(train_df[col_name])
+        test_series = validate_series(test_df[col_name])
+
+        # Choose model
+        if has_strong_seasonality(train_series):
+            model = SeasonalAD()
+            model_type = "SeasonalAD"
+        else:
+            model = PersistAD(window=7, c=3.0)
+            model_type = "PersistAD"
+
+        model.fit(train_series)
+        anomalies = model.detect(test_series)
+
+        # Save model and type
+        with open(MODEL_DIR / f"{col_name}_{model_type}.pkl", "wb") as f:
+            pickle.dump(model, f)
+
+        model_types[col_name] = model_type
+        logging.info(f"{col_name}: using {model_type}")
+        return col_name, anomalies
+    except Exception as e:
+        logging.error(f"{col_name}: {e}")
+        model_types[col_name] = "Error"
+        return col_name, pd.Series(index=test_df.index, data=False)
+
+# --- PARALLEL EXECUTION ---
+start_time = time.time()
+anomaly_results = {}
+
+logging.info("Detecting anomalies across all features...")
+with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+    futures = [executor.submit(train_and_detect, col) for col in df.columns]
+    for future in as_completed(futures):
+        col, result = future.result()
+        anomaly_results[col] = result
+
+# --- COMBINE AND SAVE RESULTS ---
+anomaly_df = pd.concat(anomaly_results.values(), axis=1)
+anomaly_df.columns = anomaly_results.keys()
+anomaly_df.index.name = "date"
+
+anomaly_df.to_csv(BASE_DIR / "march2025_anomalies.csv")
+
+# --- OUTPUT MODEL TYPES ---
+model_summary = pd.Series(model_types, name="ModelType")
+model_summary.index.name = "Feature"
+model_summary.to_csv(BASE_DIR / "model_types_used.csv")
+
+logging.info("✅ Done. Time: %.2fs", time.time() - start_time)
+logging.info("Anomalies saved to: %s", BASE_DIR / "march2025_anomalies.csv")
+logging.info("Model type summary saved to: %s", BASE_DIR / "model_types_used.csv")
+
+# --- OPTIONAL: SHOW MODEL TYPE SUMMARY IN NOTEBOOK ---
+print("\n📋 Model type per column:")
+display(model_summary.to_frame())
