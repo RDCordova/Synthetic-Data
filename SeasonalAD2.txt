@@ -1,0 +1,77 @@
+import pandas as pd
+import pickle
+from adtk.detector import SeasonalAD
+from adtk.data import validate_series
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import os
+import time
+import logging
+import warnings
+
+# --- ENVIRONMENT SETUP ---
+warnings.filterwarnings("ignore")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# --- DYNAMIC BASE DIR (SageMaker-safe) ---
+BASE_DIR = Path(os.getcwd()) / "seasonad_output"
+MODEL_DIR = BASE_DIR / "models"
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+print(f"✅ Base directory set to: {BASE_DIR}")
+
+# --- SETTINGS ---
+CSV_FILE = "your_file.csv"  # Replace with your filename
+NUM_WORKERS = 8
+
+# --- LOAD AND PREPROCESS ---
+logging.info("Loading data...")
+df = pd.read_csv(CSV_FILE, parse_dates=[0])
+df.set_index(df.columns[0], inplace=True)
+df = df.sort_index()
+df = df.apply(pd.to_numeric, errors="coerce").fillna(0).astype("float32")
+
+# --- SPLIT TRAIN / TEST ---
+train_df = df["2024-12-01":"2025-02-28"]
+test_df = df["2025-03-01":"2025-03-31"]
+
+# --- WORKER FUNCTION ---
+def train_and_detect(col_name):
+    try:
+        train_series = validate_series(train_df[col_name])
+        test_series = validate_series(test_df[col_name])
+
+        model = SeasonalAD()
+        model.fit(train_series)
+
+        # Save model
+        with open(MODEL_DIR / f"{col_name}_seasonad.pkl", "wb") as f:
+            pickle.dump(model, f)
+
+        # Detect anomalies in test window
+        anomalies = model.detect(test_series)
+        return col_name, anomalies
+    except Exception as e:
+        logging.error(f"Error processing column {col_name}: {e}")
+        return col_name, pd.Series(index=test_df.index, data=False)
+
+# --- PARALLEL EXECUTION ---
+start_time = time.time()
+anomaly_results = {}
+
+logging.info("Running SeasonalAD detection across all features...")
+with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+    futures = [executor.submit(train_and_detect, col) for col in df.columns]
+    for future in as_completed(futures):
+        col, result = future.result()
+        anomaly_results[col] = result
+
+# --- COMBINE RESULTS ---
+logging.info("Compiling anomaly results into a single DataFrame...")
+anomaly_df = pd.concat(anomaly_results.values(), axis=1)
+anomaly_df.columns = anomaly_results.keys()
+anomaly_df.index.name = "date"
+
+# --- SAVE RESULTS ---
+anomaly_df.to_csv(BASE_DIR / "march2025_anomalies.csv")
+logging.info("✅ Finished in %.2f seconds. Anomalies saved to: %s", time.time() - start_time, BASE_DIR / "march2025_anomalies.csv")
