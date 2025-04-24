@@ -1,0 +1,102 @@
+import pandas as pd
+import pickle
+import matplotlib.pyplot as plt
+from adtk.detector import SeasonalAD
+from adtk.data import validate_series
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import os
+import time
+import logging
+import warnings
+from IPython.display import Image, display
+
+# --- ENVIRONMENT SETUP ---
+warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# --- DYNAMIC BASE DIR (SageMaker-safe) ---
+BASE_DIR = Path(os.getcwd()) / "seasonad_output"
+MODEL_DIR = BASE_DIR / "models"
+PLOTS_DIR = BASE_DIR / "plots"
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+print(f"✅ Base directory set to: {BASE_DIR}")
+
+# --- SETTINGS ---
+CSV_FILE = "your_file.csv"  # Replace with your CSV file
+NUM_WORKERS = 8  # Tune based on your instance size
+
+# --- LOAD AND PREPROCESS ---
+logging.info("Loading and preparing data...")
+df = pd.read_csv(CSV_FILE, parse_dates=[0])
+df.set_index(df.columns[0], inplace=True)
+df = df.sort_index()
+df = df.apply(pd.to_numeric, errors="coerce").fillna(0).astype("float32")
+
+# --- SPLIT TRAIN / TEST ---
+train_df = df["2024-12-01":"2025-02-28"]
+test_df = df["2025-03-01":"2025-03-31"]
+
+# --- WORKER FUNCTION ---
+def train_and_detect(col_name):
+    try:
+        train_series = validate_series(train_df[col_name])
+        test_series = validate_series(test_df[col_name])
+        full_series = pd.concat([train_series, test_series])
+
+        model = SeasonalAD()
+        model.fit(train_series)
+
+        # Save model
+        with open(MODEL_DIR / f"{col_name}_seasonad.pkl", "wb") as f:
+            pickle.dump(model, f)
+
+        # Detect anomalies in March
+        anomalies = model.detect(test_series)
+
+        # Combine full anomalies
+        full_anomalies = pd.Series(False, index=full_series.index)
+        full_anomalies.update(anomalies)
+
+        # Plot full timeline (Dec – Mar)
+        plt.figure(figsize=(12, 4))
+        full_series.plot(label="Observed", alpha=0.7)
+        full_anomalies[full_anomalies].plot(style='ro', label="March Anomalies")
+        plt.axvspan("2025-03-01", "2025-03-31", color="lightgray", alpha=0.2, label="Test Period")
+        plt.title(f"Anomalies for {col_name} (Dec 2024 – Mar 2025)")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(PLOTS_DIR / f"{col_name}_anomalies_dec_to_mar.png")
+        plt.close()
+
+        return col_name, anomalies
+    except Exception as e:
+        logging.error(f"Error processing column {col_name}: {e}")
+        return col_name, pd.Series(dtype=bool)
+
+# --- RUN PARALLEL EXECUTION ---
+start_time = time.time()
+anomaly_results = {}
+
+logging.info("Starting model training and anomaly detection...")
+with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+    futures = [executor.submit(train_and_detect, col) for col in df.columns]
+    for future in as_completed(futures):
+        col, result = future.result()
+        anomaly_results[col] = result
+
+# --- COMBINE RESULTS ---
+logging.info("Combining and saving results...")
+anomaly_df = pd.concat(anomaly_results.values(), axis=1)
+anomaly_df.columns = anomaly_results.keys()
+anomaly_df.to_csv(BASE_DIR / "march2025_anomalies.csv")
+
+logging.info("✅ All tasks complete in %.2f seconds", time.time() - start_time)
+
+# --- DISPLAY ALL PLOTS INLINE ---
+logging.info("📊 Displaying all plots inline...")
+for plot_file in sorted(PLOTS_DIR.glob("*.png")):
+    display(Image(filename=plot_file))
+
