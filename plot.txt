@@ -1,0 +1,30 @@
+# --- CREATE PLOT DIR FOR DAILY COUNTS WITH ANOMALY MARKERS ---
+DAILY_PLOT_DIR = BASE_DIR / "daily_counts_plots"
+DAILY_PLOT_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- SUBSET THE FULL RANGE TO PLOT ---
+plot_range_df = df["2024-12-01":"2025-03-31"]
+
+# --- PLOT EACH COLUMN WITH ANOMALIES MARKED IN MARCH ---
+for col in plot_range_df.columns:
+    plt.figure(figsize=(12, 4))
+    full_series = plot_range_df[col]
+
+    # Plot full series (Dec–Mar)
+    full_series.plot(label="Daily Count", alpha=0.7)
+
+    # Overlay anomaly markers if available
+    if col in anomaly_df.columns:
+        march_anomalies = anomaly_df[col]
+        anomaly_points = df.loc[march_anomalies[march_anomalies].index, col]
+        plt.plot(anomaly_points.index, anomaly_points.values, "ro", label="Anomaly")
+
+    plt.title(f"Daily Counts with Anomalies: {col} (Dec 2024 – Mar 2025)")
+    plt.xlabel("Date")
+    plt.ylabel("Event Count")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(DAILY_PLOT_DIR / f"{col}_daily_counts_with_anomalies.png")
+    plt.close()
+
+logging.info("✅ Daily plots with anomalies saved to: %s", DAILY_PLOT_DIR)
