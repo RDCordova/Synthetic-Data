@@ -1,0 +1,131 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from prophet import Prophet
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import os
+import time
+import logging
+import warnings
+
+# --- SETUP ---
+warnings.filterwarnings("ignore")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+BASE_DIR = Path(os.getcwd()) / "prophet_output"
+MODEL_DIR = BASE_DIR / "forecasts"
+PLOT_DIR = BASE_DIR / "anomaly_plots"
+for d in [BASE_DIR, MODEL_DIR, PLOT_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
+print(f"✅ Base directory set to: {BASE_DIR}")
+
+# --- SETTINGS ---
+CSV_FILE = "your_file.csv"  # Replace with your CSV file
+NUM_WORKERS = 8
+
+# --- LOAD DATA ---
+df = pd.read_csv(CSV_FILE, parse_dates=[0])
+df.set_index(df.columns[0], inplace=True)
+df = df.sort_index()
+df = df.apply(pd.to_numeric, errors="coerce").fillna(0).astype("float32")
+
+# --- TRAIN/TEST SPLIT ---
+train_df = df["2024-12-01":"2025-02-28"]
+test_df = df["2025-03-01":"2025-03-31"]
+march_index = test_df.index
+
+# --- PLOT FUNCTION ---
+def plot_prophet_anomalies(col_name, forecast_df, actual_series, anomalies, output_dir):
+    plt.figure(figsize=(12, 6))
+
+    # Plot forecast
+    plt.plot(forecast_df['ds'], forecast_df['yhat'], label='Forecast', color='blue')
+    plt.fill_between(forecast_df['ds'], forecast_df['yhat_lower'], forecast_df['yhat_upper'],
+                     color='lightblue', alpha=0.5, label='Confidence Interval')
+
+    # Plot actual values
+    plt.plot(actual_series.index, actual_series.values, label='Actual', color='black')
+
+    # Highlight anomalies
+    anomaly_dates = anomalies[anomalies].index
+    anomaly_values = actual_series[anomaly_dates]
+    plt.scatter(anomaly_dates, anomaly_values, color='red', label='Anomalies', zorder=5)
+
+    plt.title(f'Anomaly Detection for {col_name} (Prophet)')
+    plt.xlabel('Date')
+    plt.ylabel('Value')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{col_name}_anomaly_plot.png")
+    plt.close()
+
+# --- FORECASTING + ANOMALY DETECTION FUNCTION ---
+forecast_results = {}  # Store forecast DataFrames for each column
+anomaly_results = {}
+
+def detect_with_prophet(col_name):
+    try:
+        # Prepare Prophet-formatted training data
+        series = train_df[col_name].reset_index()
+        series.columns = ['ds', 'y']
+        if series['y'].sum() == 0:
+            raise ValueError("No signal to model.")
+
+        # Train Prophet
+        model = Prophet(daily_seasonality=True)
+        model.fit(series)
+
+        # Forecast for March
+        future = pd.DataFrame({'ds': march_index})
+        forecast = model.predict(future)
+        forecast.set_index('ds', inplace=True)
+
+        # Compare with actuals
+        actuals = test_df[col_name]
+        anomalies = (actuals < forecast['yhat_lower']) | (actuals > forecast['yhat_upper'])
+
+        # Store results
+        forecast_results[col_name] = forecast.reset_index()
+        anomaly_results[col_name] = anomalies
+
+        # Plot
+        plot_prophet_anomalies(col_name, forecast.reset_index(), actuals, anomalies, PLOT_DIR)
+
+        return col_name, anomalies
+
+    except Exception as e:
+        logging.error(f"{col_name}: {e}")
+        empty_series = pd.Series(False, index=march_index)
+        anomaly_results[col_name] = empty_series
+        return col_name, empty_series
+
+# --- PARALLEL EXECUTION ---
+start_time = time.time()
+logging.info("Detecting anomalies using Prophet...")
+
+with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+    futures = [executor.submit(detect_with_prophet, col) for col in df.columns]
+    for future in as_completed(futures):
+        col, result = future.result()
+
+# --- COMBINE RESULTS ---
+anomaly_df = pd.concat(anomaly_results.values(), axis=1)
+anomaly_df.columns = anomaly_results.keys()
+anomaly_df.index.name = "date"
+
+anomaly_df.to_csv(BASE_DIR / "march2025_anomalies.csv")
+
+# --- COUNT ANOMALIES ---
+anomaly_counts = anomaly_df.sum().sort_values(ascending=False)
+anomaly_counts.name = "AnomalyCount"
+anomaly_counts.to_csv(BASE_DIR / "anomaly_counts.csv")
+
+# --- SUMMARY OUTPUT ---
+print("\n📋 Top columns with most anomalies in March:")
+display(anomaly_counts.head(10).to_frame())
+
+logging.info("✅ All done! Total time: %.2fs", time.time() - start_time)
+logging.info("📁 Anomaly matrix: %s", BASE_DIR / "march2025_anomalies.csv")
+logging.info("📁 Anomaly counts: %s", BASE_DIR / "anomaly_counts.csv")
+logging.info("📈 Anomaly plots saved in: %s", PLOT_DIR)
