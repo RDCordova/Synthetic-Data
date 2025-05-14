@@ -1,0 +1,142 @@
+import os
+import json
+import pandas as pd
+import numpy as np
+import boto3
+from datetime import datetime
+from landchain_aws import ChatBedrockConverse
+
+# ------------------------------------
+# Configuration for CRIS + Bedrock
+# ------------------------------------
+bedrock_client = boto3.client(
+    service_name="bedrock-runtime",
+    region_name="us-east-1"
+)
+
+llm_base = ChatBedrockConverse(
+    model_id="arn:aws:bedrock:us-east-1:070476157162:application-inference-profile/ykn1hgt3k3xh",
+    client=bedrock_client,
+    provider="anthropic"
+)
+
+# Claude call wrapper
+def call_claude(prompt: str):
+    response = llm_base.invoke(prompt)
+    return response.content.strip()
+
+# ------------------------------------
+# Core Anomaly Judgment Logic
+# ------------------------------------
+
+us_holidays_2025 = {
+    "2025-01-01", "2025-01-20", "2025-02-17", "2025-05-26", "2025-06-19",
+    "2025-07-04", "2025-09-01", "2025-10-13", "2025-11-11", "2025-11-27", "2025-12-25"
+}
+us_holidays_2025 = set(pd.to_datetime(list(us_holidays_2025)))
+
+def load_event_csvs(folder_path):
+    return {
+        filename: pd.read_csv(os.path.join(folder_path, filename))
+        for filename in os.listdir(folder_path) if filename.endswith('.csv')
+    }
+
+def preprocess(df):
+    df.columns = df.columns.str.strip()
+    df['Date'] = pd.to_datetime(df['Date'])
+    df['Anomaly'] = df['Anomaly'].astype(str).str.strip().map({'True': True, 'False': False})
+    return df
+
+def build_improved_prompt(df, anomaly_row):
+    df = df.copy()
+    anomaly_date = anomaly_row['Date']
+    anomaly_value = anomaly_row['Volumn']
+
+    mean_volume = df['Volumn'].mean()
+    std_volume = df['Volumn'].std()
+    z_score = (anomaly_value - mean_volume) / std_volume if std_volume > 0 else 0
+
+    holiday_dates = sorted([d.date() for d in df['Date'] if d in us_holidays_2025])
+    holiday_str = ", ".join(map(str, holiday_dates)) if holiday_dates else "None"
+
+    ts_str = ""
+    for _, row in df.iterrows():
+        date = row['Date'].date()
+        vol = row['Volumn']
+        flags = []
+        if row['Date'] in us_holidays_2025:
+            flags.append("HOLIDAY")
+        if row['Date'] == anomaly_date:
+            flags.append("FLAGGED")
+        flag_str = f" ← {', '.join(flags)}" if flags else ""
+        ts_str += f"{date} - Volume: {vol}{flag_str}\n"
+
+    prompt = f"""
+You are a data quality analyst at a financial services firm. Your role is to validate whether flagged data points in a time series are real anomalies or acceptable fluctuations.
+
+This event occurs daily, so even relatively small deviations from trend may indicate meaningful anomalies. 
+Note: Volume tends to dip on holidays, which may not indicate a true anomaly. Use caution when judging low values near holiday dates.
+
+Known holidays in this 30-day window: {holiday_str}
+
+Below is a 30-day daily volume time series. A model has flagged a potential anomaly on **{anomaly_date.date()}**.
+
+The average volume over the 30 days is {mean_volume:.1f}, with a standard deviation of {std_volume:.1f}.  
+The flagged value is {anomaly_value:.1f}, which is {z_score:.2f} standard deviations from the mean.
+
+Use surrounding values to assess whether this point is truly unusual. Look for similar spikes or dips that might indicate a repeated pattern.
+
+---
+
+Time Series Data:
+{ts_str.strip()}
+
+---
+
+Your answer must use the following format:
+
+Judgment: [True Positive / False Positive]  
+Reason: <Your brief justification>
+""".strip()
+
+    return prompt
+
+def generate_all_prompts(folder_path):
+    event_data = load_event_csvs(folder_path)
+    prompts = []
+
+    for event_name, df in event_data.items():
+        df = preprocess(df)
+        for _, row in df[df['Anomaly'] == True].iterrows():
+            prompt = build_improved_prompt(df, row)
+            prompts.append({
+                "event": event_name,
+                "anomaly_date": row["Date"].date(),
+                "volume": row["Volumn"],
+                "prompt": prompt
+            })
+
+    return prompts
+
+def run_full_anomaly_judgment_pipeline(folder_path):
+    prompts = generate_all_prompts(folder_path)
+    results = []
+
+    for item in prompts:
+        try:
+            response = call_claude(item['prompt'])
+            results.append({
+                "event": item['event'],
+                "anomaly_date": item['anomaly_date'],
+                "volume": item['volume'],
+                "llm_response": response
+            })
+        except Exception as e:
+            results.append({
+                "event": item['event'],
+                "anomaly_date": item['anomaly_date'],
+                "volume": item['volume'],
+                "llm_response": f"Error: {str(e)}"
+            })
+
+    return results
