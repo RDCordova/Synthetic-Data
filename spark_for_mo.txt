@@ -1,0 +1,50 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, DateType, DoubleType
+import pandas as pd
+from prophet import Prophet
+
+
+spark = SparkSession.builder \
+    .appName("ProphetForecastPerLoan") \
+    .config("spark.executor.instances", "20") \         
+    .config("spark.executor.cores", "4") \              
+    .config("spark.executor.memory", "8g") \           
+    .config("spark.driver.memory", "8g") \             
+    .config("spark.sql.shuffle.partitions", "800") \    
+    .getOrCreate()
+
+
+forecast_schema = StructType([
+    StructField("loan_id", StringType()),
+    StructField("ds", DateType()),
+    StructField("yhat", DoubleType()),
+    StructField("yhat_lower", DoubleType()),
+    StructField("yhat_upper", DoubleType())
+])
+
+def forecast_with_prophet(batch: pd.DataFrame) -> pd.DataFrame:
+    loan_id = batch['LN_ID'].iloc[0]
+    df = batch[['date', 'value']].dropna().rename(columns={'date': 'ds', 'value': 'y'})
+
+
+    try:
+        model = Prophet() # add you parms
+        model.fit(df)
+
+        forecast = model.predict(future)
+
+        result = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+        result['loan_id'] = loan_id
+
+        return result[['loan_id', 'ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+
+    except Exception as e:
+        print(f"Error processing loan_id {loan_id}: {e}")
+        return pd.DataFrame(columns=['loan_id', 'ds', 'yhat', 'yhat_lower', 'yhat_upper'])
+
+result_df = spark_df.groupBy("loan_id").applyInPandas(
+    forecast_with_prophet,
+    schema=forecast_schema
+)
+
+
