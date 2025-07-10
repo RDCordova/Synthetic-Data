@@ -1,0 +1,23 @@
+def plot_smoothed_line(ax, df, x_col, y_col, color='blue', linewidth=3):
+    df_sorted = df.sort_values(x_col).dropna(subset=[x_col, y_col])
+    
+    x = pd.to_datetime(df_sorted[x_col])
+    y = df_sorted[y_col].values
+
+    if len(x) < 4:
+        ax.plot(x, y, color=color, linewidth=linewidth)
+        return
+
+    # Convert datetime to ordinal (float days since year 0001)
+    x_num = x.map(pd.Timestamp.toordinal).values.astype(float)
+
+    # Create smooth interpolation
+    x_smooth = np.linspace(x_num.min(), x_num.max(), 300)
+    spline = make_interp_spline(x_num, y, k=3)
+    y_smooth = spline(x_smooth)
+
+    # Convert back to datetime for plotting
+    x_smooth_dt = pd.to_datetime(x_smooth, origin='unix', unit='D')  # accurate mapping
+
+    ax.plot(x_smooth_dt, y_smooth, color=color, linewidth=linewidth)
+
