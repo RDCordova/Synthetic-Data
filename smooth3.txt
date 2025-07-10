@@ -1,0 +1,24 @@
+def plot_smoothed_line(ax, df, x_col, y_col, color='blue', linewidth=3):
+    df_sorted = df.sort_values(x_col).dropna(subset=[x_col, y_col])
+    
+    x = pd.to_datetime(df_sorted[x_col])
+    y = df_sorted[y_col].values
+
+    if len(x) < 4:
+        ax.plot(x, y, color=color, linewidth=linewidth)
+        return
+
+    # Convert datetime to int64 (nanoseconds since epoch)
+    x_num = x.values.astype('int64')
+
+    # Interpolate over a smooth range of nanosecond timestamps
+    x_smooth = np.linspace(x_num.min(), x_num.max(), 300)
+    spline = make_interp_spline(x_num, y, k=3)
+    y_smooth = spline(x_smooth)
+
+    # Convert smoothed x back to datetime64[ns]
+    x_smooth_dt = pd.to_datetime(x_smooth)
+
+    # Plot
+    ax.plot(x_smooth_dt, y_smooth, color=color, linewidth=linewidth)
+
