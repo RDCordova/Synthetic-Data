@@ -1,0 +1,30 @@
+from scipy.interpolate import make_interp_spline
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def plot_smoothed_line(ax, df, x_col, y_col, color='blue', linewidth=3):
+    # Sort by x_col to ensure monotonic x
+    df_sorted = df.sort_values(x_col).dropna(subset=[x_col, y_col])
+    
+    x = pd.to_datetime(df_sorted[x_col])
+    y = df_sorted[y_col].values
+    
+    if len(x) < 4:
+        # Not enough points for smoothing — fallback to normal line
+        ax.plot(x, y, color=color, linewidth=linewidth)
+        return
+
+    # Convert datetime to numeric
+    x_num = x.astype(np.int64)  # nanoseconds since epoch
+    x_num = (x_num - x_num.min()) / 1e9  # convert to seconds from min
+    
+    # Create smoothed x and y
+    x_smooth = np.linspace(x_num.min(), x_num.max(), 300)
+    spline = make_interp_spline(x_num, y, k=3)
+    y_smooth = spline(x_smooth)
+
+    # Convert back to datetime for plotting
+    x_smooth_dt = pd.to_datetime(x_smooth * 1e9 + x_num.min() * 1e9)
+
+    ax.plot(x_smooth_dt, y_smooth, color=color, linewidth=linewidth)
