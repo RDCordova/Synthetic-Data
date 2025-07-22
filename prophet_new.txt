@@ -1,0 +1,29 @@
+from prophet import Prophet
+import pandas as pd
+
+def get_anomaly_flags(df, train_start, train_end, test_start, test_end):
+    # Ensure datetime format
+    df['ds'] = pd.to_datetime(df['ds'])
+
+    # Split train and test sets
+    train_df = df[(df['ds'] >= train_start) & (df['ds'] <= train_end)].copy()
+    test_df = df[(df['ds'] >= test_start) & (df['ds'] <= test_end)].copy()
+
+    # Train the Prophet model
+    model = Prophet()
+    model.fit(train_df)
+
+    # Predict for the test period
+    future = pd.DataFrame({'ds': test_df['ds']})
+    forecast = model.predict(future)
+
+    # Merge forecast and actual test values
+    merged = forecast[['ds', 'yhat_lower', 'yhat_upper']].merge(test_df[['ds', 'y']], on='ds')
+
+    # Determine if the actual is outside the prediction interval
+    merged['anomaly'] = (merged['y'] < merged['yhat_lower']) | (merged['y'] > merged['yhat_upper'])
+
+    # Return just the anomaly flags (aligned with test_df)
+    return merged[['ds', 'anomaly']]
+
+
