@@ -1,0 +1,44 @@
+from prophet import Prophet
+import pandas as pd
+
+def detect_anomalies_wide_format(df, train_start, train_end, test_start, test_end):
+    # Ensure datetime format
+    df['date'] = pd.to_datetime(df['date'])
+
+    # Get test date range
+    test_dates = pd.date_range(start=test_start, end=test_end)
+    result_df = pd.DataFrame({'date': test_dates})
+
+    # Loop over each event column (skip the date column)
+    for event in df.columns:
+        if event == 'date':
+            continue
+
+        # Prepare per-event dataframe
+        event_df = df[['date', event]].rename(columns={'date': 'ds', event: 'y'}).dropna()
+        
+        # Train/test split
+        train_df = event_df[(event_df['ds'] >= train_start) & (event_df['ds'] <= train_end)].copy()
+        test_df = event_df[(event_df['ds'] >= test_start) & (event_df['ds'] <= test_end)].copy()
+
+        # Skip if insufficient training data
+        if len(train_df) < 10:
+            result_df[event] = None
+            continue
+
+        # Fit Prophet
+        model = Prophet()
+        model.fit(train_df)
+
+        # Predict for test period
+        future = pd.DataFrame({'ds': test_df['ds']})
+        forecast = model.predict(future)
+
+        # Merge predictions with actuals
+        merged = forecast[['ds', 'yhat_lower', 'yhat_upper']].merge(test_df, on='ds')
+        merged['anomaly'] = (merged['y'] < merged['yhat_lower']) | (merged['y'] > merged['yhat_upper'])
+
+        # Add to result
+        result_df = result_df.merge(merged[['ds', 'anomaly']].rename(columns={'ds': 'date', 'anomaly': event}), on='date', how='left')
+
+    return result_df
