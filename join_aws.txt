@@ -1,0 +1,43 @@
+import boto3
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import tempfile
+import os
+
+# Set your S3 bucket and prefix (folder)
+bucket_name = 'your-bucket-name'
+prefix = 'your/prefix/'  # Make sure it ends with a '/'
+
+# Initialize S3 client
+s3 = boto3.client('s3')
+
+# List all .parquet files under the prefix
+response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+
+# Filter for .parquet files
+parquet_keys = sorted([
+    content['Key'] for content in response.get('Contents', [])
+    if content['Key'].endswith('.parquet')
+])
+
+# Temporary directory for downloading files
+with tempfile.TemporaryDirectory() as tmpdir:
+    local_files = []
+
+    for key in parquet_keys:
+        local_path = os.path.join(tmpdir, os.path.basename(key))
+        s3.download_file(bucket_name, key, local_path)
+        local_files.append(local_path)
+        print(f"Downloaded: {key} → {local_path}")
+
+    # Read all downloaded files into DataFrames
+    dataframes = [pd.read_parquet(f) for f in local_files]
+    combined_df = pd.concat(dataframes, ignore_index=True)
+
+    # Write combined result to Parquet
+    output_path = 'rejoined_file.parquet'
+    table = pa.Table.from_pandas(combined_df)
+    pq.write_table(table, output_path, compression='snappy')  # Optional: compression
+
+    print(f"\n✅ Successfully rejoined {len(local_files)} files into {output_path}")
