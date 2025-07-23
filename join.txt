@@ -1,0 +1,27 @@
+import os
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+# Folder with the split Parquet files
+input_folder = "split_files"
+output_file = "rejoined_file.parquet"
+
+# Get all part files in order (adjust pattern if needed)
+part_files = sorted([
+    os.path.join(input_folder, f)
+    for f in os.listdir(input_folder)
+    if f.endswith(".parquet")
+])
+
+# Read all parts into one DataFrame
+dataframes = [pd.read_parquet(f) for f in part_files]
+combined_df = pd.concat(dataframes, ignore_index=True)
+
+# Write back to a single Parquet file
+table = pa.Table.from_pandas(combined_df)
+pq.write_table(table, output_file)
+
+print(f"Successfully rejoined {len(part_files)} files into {output_file}")
+
+
