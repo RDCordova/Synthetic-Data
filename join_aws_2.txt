@@ -1,0 +1,45 @@
+import boto3
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import os
+import tempfile
+
+# --- CONFIG ---
+bucket_name = 'your-bucket-name'
+prefix = 'split-files/'  # e.g., 'my-folder/splits/', must end with '/'
+
+# --- INIT S3 ---
+s3 = boto3.client('s3')
+
+# --- LIST parquet FILES UNDER PREFIX ---
+paginator = s3.get_paginator('list_objects_v2')
+page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+
+parquet_keys = []
+for page in page_iterator:
+    for obj in page.get('Contents', []):
+        if obj['Key'].endswith('.parquet'):
+            parquet_keys.append(obj['Key'])
+
+parquet_keys.sort()  # Ensure consistent order
+
+# --- DOWNLOAD, COMBINE, WRITE ---
+with tempfile.TemporaryDirectory() as tmpdir:
+    local_paths = []
+    for key in parquet_keys:
+        local_file = os.path.join(tmpdir, os.path.basename(key))
+        s3.download_file(bucket_name, key, local_file)
+        local_paths.append(local_file)
+        print(f"Downloaded: {key}")
+
+    # Combine
+    dataframes = [pd.read_parquet(f) for f in local_paths]
+    combined_df = pd.concat(dataframes, ignore_index=True)
+
+    # Save result
+    output_path = "rejoined_file.parquet"
+    pq.write_table(pa.Table.from_pandas(combined_df), output_path, compression='snappy')
+
+    print(f"\n✅ Rejoined {len(local_paths)} files into {output_path}")
+
