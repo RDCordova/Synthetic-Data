@@ -1,0 +1,30 @@
+import pandas as pd
+import pyarrow.parquet as pq
+import pyarrow as pa
+import os
+
+# Load the Parquet file in chunks
+input_path = "your_large_file.parquet"
+output_folder = "split_files"
+target_size_mb = 500  # Target size per file in MB
+
+os.makedirs(output_folder, exist_ok=True)
+
+# Read entire Parquet into memory
+df = pd.read_parquet(input_path)
+
+# Estimate rows per file based on memory usage
+total_size_bytes = df.memory_usage(deep=True).sum()
+rows = len(df)
+bytes_per_row = total_size_bytes / rows
+rows_per_file = int((target_size_mb * 1024**2) / bytes_per_row)
+
+print(f"Estimated rows per 500MB file: {rows_per_file}")
+
+# Split and save
+for i in range(0, rows, rows_per_file):
+    df_chunk = df.iloc[i:i + rows_per_file]
+    output_file = os.path.join(output_folder, f"part_{i // rows_per_file}.parquet")
+    table = pa.Table.from_pandas(df_chunk)
+    pq.write_table(table, output_file)
+    print(f"Wrote {output_file}")
