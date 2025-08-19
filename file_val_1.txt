@@ -1,0 +1,211 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+# Configure accepted date formats
+DATE_FORMATS = ["%Y-%m-%d", "%Y%m%d", "%Y/%m/%d", "%m/%d/%Y"]
+
+def _try_parse_dates(series: pd.Series, formats=DATE_FORMATS) -> pd.Series:
+    """Coerce strings → datetime using multiple formats; preserves NaN."""
+    s = series.astype("string")
+    out = pd.Series(index=s.index, dtype="datetime64[ns]")
+    mask_remaining = s.notna()
+
+    for fmt in formats:
+        if not mask_remaining.any():
+            break
+        parsed = pd.to_datetime(s[mask_remaining], format=fmt, errors="coerce")
+        fill_mask = parsed.notna()
+        out.loc[mask_remaining[mask_remaining].index[fill_mask]] = parsed[fill_mask]
+        mask_remaining.loc[mask_remaining[mask_remaining].index[fill_mask]] = False
+
+    # Anything still unparsed stays NaT
+    return out
+
+def _ddl_columns_by_name(ddl: dict) -> dict:
+    by_name = {}
+    for block in ddl.get("ddl", []):
+        for col in block.get("columns", []):
+            by_name[col["name"]] = col
+    return by_name
+
+def validate_df_against_ddl(df: pd.DataFrame, ddl: dict):
+    """
+    Validate a flat DataFrame against your DDL JSON.
+    Returns:
+      - errors_df: row-level issues (row_index, column, issue, value)
+      - summary: dict with overall status, missing/unexpected, per-col counts
+    """
+    by_name = _ddl_columns_by_name(ddl)
+    ddl_cols = set(by_name.keys())
+    df_cols = set(df.columns)
+
+    required = {c for c, d in by_name.items() if not (d.get("type", {}) or {}).get("nullable", True)}
+    missing_required = sorted(list(required - df_cols))
+    unexpected = sorted(list(df_cols - ddl_cols))
+
+    # Column-level counts (filled as we go)
+    col_summary = {c: {"errors": 0, "nulls": int(df[c].isna().sum()) if c in df_cols else None} for c in ddl_cols}
+
+    errors = []
+
+    # Early fail on missing required columns (no row-level entries yet)
+    overall_valid = len(missing_required) == 0
+
+    # Validate only columns that exist in df and in ddl
+    for col in sorted(ddl_cols & df_cols):
+        spec = by_name[col]
+        typ = (spec.get("type", {}) or {}).get("datatype", "").upper()
+        nullable = (spec.get("type", {}) or {}).get("nullable", True)
+        declared_max_len = (spec.get("type", {}) or {}).get("maxLength", None)
+        meta = spec.get("metadata", {}) or {}
+
+        s = df[col]
+
+        # Nullability
+        null_mask = s.isna() | (s.astype("string").str.strip() == "")
+        if not nullable:
+            bad_null = null_mask
+            if bad_null.any():
+                n_bad = int(bad_null.sum())
+                col_summary[col]["errors"] += n_bad
+                overall_valid = False
+                for i in s.index[bad_null]:
+                    errors.append({"row_index": int(i), "column": col, "issue": "Null/empty but not nullable", "value": None})
+
+        # Only validate non-null values
+        nn = s[~null_mask]
+
+        if typ in ("INT", "INTEGER"):
+            coerced = pd.to_numeric(nn, errors="coerce", downcast="integer")
+            bad_type = coerced.isna()
+            if bad_type.any():
+                n_bad = int(bad_type.sum())
+                col_summary[col]["errors"] += n_bad
+                overall_valid = False
+                for i, v in nn[bad_type].items():
+                    errors.append({"row_index": int(i), "column": col, "issue": "Expected INT", "value": v})
+
+            # Range checks (use only good values)
+            good_vals = coerced[~bad_type]
+            minv, maxv = meta.get("minValue"), meta.get("maxValue")
+            if minv is not None:
+                oob = good_vals < minv
+                if oob.any():
+                    n_bad = int(oob.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                    for i, v in good_vals[oob].items():
+                        errors.append({"row_index": int(i), "column": col, "issue": f"< minValue {minv}", "value": int(v)})
+            if maxv is not None:
+                oob = good_vals > maxv
+                if oob.any():
+                    n_bad = int(oob.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                    for i, v in good_vals[oob].items():
+                        errors.append({"row_index": int(i), "column": col, "issue": f"> maxValue {maxv}", "value": int(v)})
+
+        elif typ in ("FLOAT", "DOUBLE", "DECIMAL", "NUMERIC"):
+            coerced = pd.to_numeric(nn, errors="coerce")
+            bad_type = coerced.isna()
+            if bad_type.any():
+                n_bad = int(bad_type.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                for i, v in nn[bad_type].items():
+                    errors.append({"row_index": int(i), "column": col, "issue": "Expected FLOAT", "value": v})
+
+            good_vals = coerced[~bad_type]
+            minv, maxv = meta.get("minValue"), meta.get("maxValue")
+            if minv is not None:
+                oob = good_vals < float(minv)
+                if oob.any():
+                    n_bad = int(oob.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                    for i, v in good_vals[oob].items():
+                        errors.append({"row_index": int(i), "column": col, "issue": f"< minValue {minv}", "value": float(v)})
+            if maxv is not None:
+                oob = good_vals > float(maxv)
+                if oob.any():
+                    n_bad = int(oob.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                    for i, v in good_vals[oob].items():
+                        errors.append({"row_index": int(i), "column": col, "issue": f"> maxValue {maxv}", "value": float(v)})
+
+        elif typ in ("DATE", "DATETIME", "TIMESTAMP"):
+            # Accept datetime-typed or coerce strings
+            if np.issubdtype(nn.dtype, np.datetime64):
+                parsed = nn
+            else:
+                parsed = _try_parse_dates(nn)
+            bad_type = parsed.isna()
+            if bad_type.any():
+                n_bad = int(bad_type.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                for i, v in nn[bad_type].items():
+                    errors.append({"row_index": int(i), "column": col, "issue": f"Expected DATE ({DATE_FORMATS})", "value": v})
+
+            good_vals = parsed[~bad_type]
+            minv, maxv = meta.get("minValue"), meta.get("maxValue")
+            if minv is not None:
+                min_dt = _try_parse_dates(pd.Series([minv])).iloc[0]
+                if pd.notna(min_dt):
+                    oob = good_vals < min_dt
+                    if oob.any():
+                        n_bad = int(oob.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                        for i, v in good_vals[oob].items():
+                            errors.append({"row_index": int(i), "column": col, "issue": f"< minValue {minv}", "value": str(v.date())})
+            if maxv is not None:
+                max_dt = _try_parse_dates(pd.Series([maxv])).iloc[0]
+                if pd.notna(max_dt):
+                    oob = good_vals > max_dt
+                    if oob.any():
+                        n_bad = int(oob.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                        for i, v in good_vals[oob].items():
+                            errors.append({"row_index": int(i), "column": col, "issue": f"> maxValue {maxv}", "value": str(v.date())})
+
+        elif typ in ("VARCHAR", "CHAR"):
+            s_str = nn.astype("string")
+
+            # categories: keys of categoryRatios
+            cat_ratios = meta.get("categoryRatios")
+            if isinstance(cat_ratios, dict) and len(cat_ratios) > 0:
+                allowed = set(cat_ratios.keys())
+                bad = ~s_str.isin(allowed)
+                if bad.any():
+                    n_bad = int(bad.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                    for i, v in s_str[bad].items():
+                        errors.append({"row_index": int(i), "column": col, "issue": "Value not in allowed categories", "value": v})
+
+            # length cap: prefer type.maxLength else metadata.maxCharLength
+            max_len = declared_max_len if declared_max_len is not None else meta.get("maxCharLength")
+            if isinstance(max_len, int):
+                too_long = s_str.str.len() > max_len
+                if too_long.any():
+                    n_bad = int(too_long.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                    for i, v in s_str[too_long].items():
+                        errors.append({"row_index": int(i), "column": col, "issue": f"Length > {max_len}", "value": v})
+
+        elif typ == "TEXT":
+            s_str = nn.astype("string")
+            min_len = meta.get("minCharLength")
+            max_len = meta.get("maxCharLength")
+            if isinstance(min_len, int):
+                too_short = s_str.str.len() < min_len
+                if too_short.any():
+                    n_bad = int(too_short.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                    for i, v in s_str[too_short].items():
+                        errors.append({"row_index": int(i), "column": col, "issue": f"Length < {min_len}", "value": v})
+            if isinstance(max_len, int):
+                too_long = s_str.str.len() > max_len
+                if too_long.any():
+                    n_bad = int(too_long.sum()); col_summary[col]["errors"] += n_bad; overall_valid = False
+                    for i, v in s_str[too_long].items():
+                        errors.append({"row_index": int(i), "column": col, "issue": f"Length > {max_len}", "value": v})
+        else:
+            # Unknown datatype — flag a warning per non-null value once
+            if len(nn) > 0:
+                col_summary[col]["errors"] += 0  # no change; informational only
+                errors.append({"row_index": -1, "column": col, "issue": f"Unrecognized datatype '{typ}' (skipped strict checks)", "value": None})
+
+    # Assemble outputs
+    errors_df = pd.DataFrame(errors, columns=["row_index", "column", "issue", "value"]).sort_values(["column", "row_index"])
+    summary = {
+        "valid": overall_valid and (errors_df.empty),
+        "missing_required_columns": missing_required,
+        "unexpected_columns": unexpected,
+        "columns": col_summary
+    }
+    return errors_df, summary
