@@ -1,0 +1,20 @@
+import boto3
+
+session = boto3.session.Session()
+region = session.region_name or "us-east-1"
+
+# Try Serverless first
+try:
+    rs_serverless = boto3.client("redshift-serverless", region_name=region)
+    wgs = rs_serverless.list_workgroups().get("workgroups", [])
+    print("Serverless workgroups:", [w["workgroupName"] for w in wgs])
+except Exception as e:
+    print("No access to redshift-serverless or none found:", e)
+
+# If you use a provisioned cluster:
+try:
+    rs = boto3.client("redshift", region_name=region)
+    clusters = rs.describe_clusters().get("Clusters", [])
+    print("Provisioned clusters:", [c["ClusterIdentifier"] for c in clusters])
+except Exception as e:
+    print("No access to redshift (provisioned) or none found:", e)
