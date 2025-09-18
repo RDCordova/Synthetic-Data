@@ -1,0 +1,35 @@
+# Upgrade just in case your Studio image is old
+# %pip install -U boto3 botocore pandas
+
+import boto3, time, pandas as pd
+print("boto3:", boto3.__version__)  # sanity check
+
+REGION  = "us-east-1"  # <- set your region
+DB_NAME = "dev"        # <- set your DB name
+WG_NAME = "alpha"      # <- your workgroup name
+
+# IMPORTANT: Use the redshift-data client (NOT "redshift")
+rsd = boto3.client("redshift-data", region_name=REGION)
+
+resp = rsd.execute_statement(
+    WorkgroupName=WG_NAME,         # valid ONLY on redshift-data
+    Database=DB_NAME,
+    Sql="select current_user, current_database(), version();"
+)
+stmt_id = resp["Id"]
+
+# wait for completion
+while True:
+    desc = rsd.describe_statement(Id=stmt_id)
+    if desc["Status"] in ("FINISHED","FAILED","ABORTED"):
+        break
+    time.sleep(0.3)
+
+if desc["Status"] != "FINISHED":
+    raise RuntimeError(desc)
+
+res  = rsd.get_statement_result(Id=stmt_id)
+cols = [c["name"] for c in res["ColumnMetadata"]]
+rows = [[v.get("stringValue") or v.get("doubleValue") or v.get("longValue") or v.get("booleanValue") for v in r]
+        for r in res["Records"]]
+pd.DataFrame(rows, columns=cols)
