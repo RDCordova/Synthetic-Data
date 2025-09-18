@@ -1,0 +1,21 @@
+import boto3
+import pandas as pd
+
+rsd = boto3.client("redshift-data", region_name=region)
+
+# ---- set ONE of these ----
+workgroup_name = "<YOUR_WORKGROUP_NAME>"     # for Serverless
+cluster_identifier = None                    # or set "<YOUR_CLUSTER_ID>" for provisioned
+
+# The DB user to run as (often same as your IAM-mapped user or a service user you were given)
+db_user = None  # leave None for serverless; set if you use provisioned w/ specific user
+
+# List databases (Serverless)
+if workgroup_name:
+    resp = rsd.list_databases(workgroupName=workgroup_name)
+    print("Databases:", resp.get("databases", []))
+
+# List databases (Provisioned)
+if cluster_identifier:
+    resp = rsd.list_databases(clusterIdentifier=cluster_identifier, DbUser=db_user)
+    print("Databases:", resp.get("databases", []))
