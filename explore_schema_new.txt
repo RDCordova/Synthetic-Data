@@ -1,0 +1,105 @@
+import pandas as pd
+
+def safe_read_sql(con, sql):
+    # Clear failed transaction before running
+    try:
+        con.rollback()
+    except Exception:
+        pass
+    return pd.read_sql(sql, con)
+
+def explore_schema(con, schema, sample_rows=5, max_tables=None):
+    # 1) Try local Redshift tables
+    try:
+        tbls = safe_read_sql(con, f"""
+            SELECT schemaname, "table" AS table_name
+            FROM svv_tables
+            WHERE schemaname = '{schema}'
+            ORDER BY "table";
+        """)
+    except Exception as e:
+        print("svv_tables error:", e)
+        tbls = pd.DataFrame()
+
+    # 2) If empty, try external Spectrum tables
+    if tbls.empty:
+        try:
+            tbls = safe_read_sql(con, f"""
+                SELECT schemaname, "table" AS table_name
+                FROM svv_external_tables
+                WHERE schemaname = '{schema}'
+                ORDER BY "table";
+            """)
+        except Exception as e:
+            print("svv_external_tables error:", e)
+
+    # 3) If still empty, fall back to information_schema
+    if tbls.empty:
+        try:
+            tbls = safe_read_sql(con, f"""
+                SELECT table_schema AS schemaname, table_name
+                FROM information_schema.tables
+                WHERE table_schema = '{schema}'
+                ORDER BY table_name;
+            """)
+        except Exception as e:
+            print("information_schema.tables error:", e)
+
+    if tbls.empty:
+        print(f"No tables found or visible in schema '{schema}'.")
+        return tbls
+
+    if max_tables is not None:
+        tbls = tbls.head(max_tables)
+
+    print(f"Found {len(tbls)} tables in schema '{schema}'.")
+
+    # Loop through each table
+    for tbl in tbls["table_name"]:
+        print(f"\n=== {schema}.{tbl} ===")
+
+        # Columns (try pg_table_def first)
+        cols = pd.DataFrame()
+        try:
+            cols = safe_read_sql(con, f"""
+                SELECT DISTINCT "column" AS column_name, type AS data_type
+                FROM pg_table_def
+                WHERE schemaname = '{schema}' AND tablename = '{tbl}'
+                ORDER BY column_name;
+            """)
+        except Exception:
+            pass
+
+        # If external, try svv_external_columns
+        if cols.empty:
+            try:
+                cols = safe_read_sql(con, f"""
+                    SELECT columnnum AS ordinal_position,
+                           "column"   AS column_name,
+                           type       AS data_type
+                    FROM svv_external_columns
+                    WHERE schemaname = '{schema}' AND "table" = '{tbl}'
+                    ORDER BY columnnum;
+                """)
+            except Exception:
+                pass
+
+        if not cols.empty:
+            print("Columns:")
+            print(cols)
+        else:
+            print("Columns: (no column metadata visible)")
+
+        # Sample rows
+        try:
+            sample = safe_read_sql(con, f'SELECT * FROM "{schema}"."{tbl}" LIMIT {sample_rows};')
+            print("Sample rows:")
+            print(sample)
+        except Exception as e:
+            print(f"Could not fetch sample rows: {e}")
+
+    return tbls
+
+# Usage:
+# schema = "your_schema"
+# tables = explore_schema(con, schema, sample_rows=5)
