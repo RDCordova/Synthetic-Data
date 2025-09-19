@@ -1,0 +1,130 @@
+iimport pandas as pd
+
+def safe_read_sql(con, sql):
+    # Clear any failed transaction before running
+    try:
+        con.rollback()
+    except Exception:
+        pass
+    return pd.read_sql(sql, con)
+
+def _get_tables_any(con, schema):
+    # 1) svv_tables using "schema"/"table"
+    try:
+        return safe_read_sql(con, f'''
+            SELECT "schema" AS schemaname, "table" AS table_name
+            FROM svv_tables
+            WHERE "schema" = '{schema}'
+            ORDER BY "table";
+        ''')
+    except Exception:
+        pass
+
+    # 2) svv_tables using schemaname/tablename (older clusters)
+    try:
+        return safe_read_sql(con, f'''
+            SELECT schemaname, tablename AS table_name
+            FROM svv_tables
+            WHERE schemaname = '{schema}'
+            ORDER BY tablename;
+        ''')
+    except Exception:
+        pass
+
+    # 3) External Spectrum
+    try:
+        return safe_read_sql(con, f'''
+            SELECT "schema" AS schemaname, "table" AS table_name
+            FROM svv_external_tables
+            WHERE "schema" = '{schema}'
+            ORDER BY "table";
+        ''')
+    except Exception:
+        pass
+
+    # 4) External (older columns)
+    try:
+        return safe_read_sql(con, f'''
+            SELECT schemaname, tablename AS table_name
+            FROM svv_external_tables
+            WHERE schemaname = '{schema}'
+            ORDER BY tablename;
+        ''')
+    except Exception:
+        pass
+
+    # 5) Engine-agnostic fallback
+    try:
+        return safe_read_sql(con, f'''
+            SELECT table_schema AS schemaname, table_name
+            FROM information_schema.tables
+            WHERE table_schema = '{schema}'
+            ORDER BY table_name;
+        ''')
+    except Exception:
+        return pd.DataFrame(columns=["schemaname","table_name"])
+
+def explore_schema(con, schema, sample_rows=5, max_tables=None):
+    """
+    Discover tables, columns, and sample rows for the given schema.
+    Works across Redshift local tables, Spectrum external tables, and falls back to information_schema.
+    """
+    tbls = _get_tables_any(con, schema)
+    if tbls.empty:
+        print(f"No tables visible in schema '{schema}'. It may be empty or you may lack privileges.")
+        return tbls
+
+    if max_tables:
+        tbls = tbls.head(max_tables)
+
+    print(f"Found {len(tbls)} tables in schema '{schema}'.")
+
+    for tbl in tbls["table_name"]:
+        print(f"\n=== {schema}.{tbl} ===")
+
+        # Try local column metadata (pg_table_def)
+        cols = pd.DataFrame()
+        try:
+            cols = safe_read_sql(con, f'''
+                SELECT DISTINCT "column" AS column_name, type AS data_type
+                FROM pg_table_def
+                WHERE schemaname = '{schema}' AND tablename = '{tbl}'
+                ORDER BY column_name;
+            ''')
+        except Exception:
+            pass
+
+        # If empty, try external column metadata (Spectrum)
+        if cols.empty:
+            try:
+                cols = safe_read_sql(con, f'''
+                    SELECT columnnum AS ordinal_position,
+                           "column"   AS column_name,
+                           type       AS data_type
+                    FROM svv_external_columns
+                    WHERE ("schema" = '{schema}' OR schemaname = '{schema}')
+                      AND ("table"  = '{tbl}'    OR tablename  = '{tbl}')
+                    ORDER BY 1;
+                ''')
+            except Exception:
+                pass
+
+        if not cols.empty:
+            print("Columns:")
+            print(cols)
+        else:
+            print("Columns: (no column metadata visible)")
+
+        # Sample a few rows (quoted identifiers handle case/special chars)
+        try:
+            sample = safe_read_sql(con, f'SELECT * FROM "{schema}"."{tbl}" LIMIT {sample_rows};')
+            print("Sample rows:")
+            print(sample)
+        except Exception as e:
+            print(f"Could not fetch sample rows: {e}")
+
+    return tbls
+
+# Example:
+# tables = explore_schema(con, "your_schema_name", sample_rows=5)
+
