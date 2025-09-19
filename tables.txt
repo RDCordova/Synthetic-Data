@@ -1,0 +1,24 @@
+schema = "your_schema"
+
+# 1. List tables
+df_tables = pd.read_sql(f"""
+    SELECT DISTINCT tablename
+    FROM pg_table_def
+    WHERE schemaname = '{schema}'
+    ORDER BY tablename;
+""", con)
+print("Tables:", df_tables)
+
+# 2. Pick a table and see columns
+table = df_tables.iloc[0,0]  # first table in the list
+df_columns = pd.read_sql(f"""
+    SELECT DISTINCT tablename, "column", type
+    FROM pg_table_def
+    WHERE schemaname = '{schema}' AND tablename = '{table}'
+    ORDER BY "column";
+""", con)
+print(df_columns)
+
+# 3. Preview rows
+df_sample = pd.read_sql(f'SELECT * FROM {schema}.{table} LIMIT 10;', con)
+print(df_sample.head())
