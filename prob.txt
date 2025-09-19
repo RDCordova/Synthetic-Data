@@ -1,0 +1,110 @@
+def redshift_discover(con, target_schema):
+    import pandas as pd
+
+    def q(sql):
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        try:
+            return pd.read_sql(sql, con)
+        except Exception as e:
+            return pd.DataFrame({"error":[str(e)], "sql":[sql]})
+
+    out = {}
+
+    # 0) Session context
+    out["session"] = q("""
+        SELECT current_database() AS database,
+               current_schema   AS search_path_schema
+        FROM sys_query_history LIMIT 1
+    """)  # current_schema via sys_query_history trick if available; safe to ignore error
+
+    # Fallbacks for session info
+    if "error" in out["session"].columns:
+        out["session"] = q("SELECT current_database() AS database")
+
+    # 1) What schemas are even visible (system catalog)
+    out["schemas_pg_namespace"] = q("""
+        SELECT nspname AS schema_name
+        FROM pg_namespace
+        WHERE nspname NOT IN ('pg_catalog','information_schema')
+        ORDER BY schema_name
+    """)
+
+    # 2) Information schema (filters by privileges)
+    out["schemas_info_schema"] = q("""
+        SELECT schema_name
+        FROM information_schema.schemata
+        ORDER BY schema_name
+    """)
+
+    # 3) External schemas (if Spectrum is used)
+    out["external_schemas"] = q("""
+        SELECT schemaname, databasename
+        FROM svv_external_schemas
+        ORDER BY schemaname
+    """)
+
+    # 4) Tables in the target schema (local)
+    out["tables_svv_tables"] = q(f"""
+        SELECT schemaname, tablename, table_type
+        FROM svv_tables
+        WHERE schemaname = '{target_schema}'
+        ORDER BY tablename
+    """)
+
+    # 5) Tables in the target schema (external)
+    out["tables_svv_external_tables"] = q(f"""
+        SELECT schemaname, tablename
+        FROM svv_external_tables
+        WHERE schemaname = '{target_schema}'
+        ORDER BY tablename
+    """)
+
+    # 6) Your schema privileges (do you have USAGE?)
+    out["schema_privs"] = q(f"""
+        SELECT *
+        FROM svv_schema_privileges
+        WHERE schemaname = '{target_schema}'
+        ORDER BY schemaname, usename
+    """)
+
+    # 7) Try setting search_path (will fail if no USAGE)
+    out["set_search_path_attempt"] = q(f"SET search_path TO \"{target_schema}\"")
+
+    # 8) If we *can* see any table names, describe columns
+    if not out["tables_svv_tables"].empty and "tablename" in out["tables_svv_tables"].columns:
+        first_tbl = out["tables_svv_tables"]["tablename"].iloc[0]
+        out["columns_first_table"] = q(f"""
+            SELECT DISTINCT tablename, "column", type
+            FROM pg_table_def
+            WHERE schemaname = '{target_schema}' AND tablename = '{first_tbl}'
+            ORDER BY "column"
+        """)
+        out["sample_first_table"] = q(f'SELECT * FROM "{target_schema}"."{first_tbl}" LIMIT 5;')
+    elif not out["tables_svv_external_tables"].empty and "tablename" in out["tables_svv_external_tables"].columns:
+        first_tbl = out["tables_svv_external_tables"]["tablename"].iloc[0]
+        out["columns_first_table"] = q(f"""
+            SELECT columnnum AS ordinal_position, "column" AS column_name, type AS data_type
+            FROM svv_external_columns
+            WHERE schemaname = '{target_schema}' AND tablename = '{first_tbl}'
+            ORDER BY columnnum
+        """)
+        out["sample_first_table"] = q(f'SELECT * FROM "{target_schema}"."{first_tbl}" LIMIT 5;')
+    else:
+        out["columns_first_table"] = pd.DataFrame()
+        out["sample_first_table"] = pd.DataFrame()
+
+    return out
+
+# ---- run it ----
+schema = "<PUT_YOUR_SCHEMA_NAME_HERE>"  # exact name, case-sensitive
+result = redshift_discover(con, schema)
+
+for k, v in result.items():
+    print(f"\n=== {k} ===")
+    try:
+        print(v.head(20))
+    except Exception as e:
+        print(e)
