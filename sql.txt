@@ -1,0 +1,4 @@
+SELECT nspname AS schema_name
+FROM pg_namespace
+WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY schema_name;
