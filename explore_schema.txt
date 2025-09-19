@@ -1,0 +1,48 @@
+import pandas as pd
+
+def explore_schema(con, schema, limit=5):
+    # 1. Get all tables in the schema
+    tables = pd.read_sql(f"""
+        SELECT tablename
+        FROM svv_tables
+        WHERE schemaname = '{schema}'
+        ORDER BY tablename;
+    """, con)
+
+    if tables.empty:
+        tables = pd.read_sql(f"""
+            SELECT tablename
+            FROM svv_external_tables
+            WHERE schemaname = '{schema}'
+            ORDER BY tablename;
+        """, con)
+
+    print(f"Found {len(tables)} tables in schema '{schema}'")
+
+    # 2. Loop through tables and display structure + sample
+    for tbl in tables["tablename"]:
+        print(f"\n=== {schema}.{tbl} ===")
+
+        # Columns
+        cols = pd.read_sql(f"""
+            SELECT DISTINCT "column", type
+            FROM pg_table_def
+            WHERE schemaname = '{schema}' AND tablename = '{tbl}'
+            ORDER BY "column";
+        """, con)
+        print("Columns:")
+        print(cols)
+
+        # Sample data
+        try:
+            sample = pd.read_sql(f'SELECT * FROM "{schema}"."{tbl}" LIMIT {limit};', con)
+            print("Sample rows:")
+            print(sample)
+        except Exception as e:
+            print(f"Could not fetch data: {e}")
+
+    return tables
+
+# Example usage
+schema = "your_schema"   # replace with your schema name
+tables = explore_schema(con, schema)
